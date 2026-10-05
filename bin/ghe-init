@@ -30,7 +30,15 @@ touch "$TARGET/ghe/runs/.gitkeep"
 for f in .claude/settings.json ghe/config.yaml; do
   if [[ -e "$TARGET/$f" && "$FORCE" != "1" ]]; then echo "[ghe-init] $f exists — left untouched (use --force)"; else cp "$SRC/$f" "$TARGET/$f"; fi
 done
-grep -qs 'ghe/runs' "$TARGET/.gitignore" 2>/dev/null || printf 'ghe/runs/*\n!ghe/runs/.gitkeep\n' >> "$TARGET/.gitignore"
+# Keep GHE local: ignore the ghe/ folder (config, runner, runs, memory) and GHE worktrees. Idempotent.
+GI="$TARGET/.gitignore"; touch "$GI"
+[[ -z "$(tail -c1 "$GI")" ]] || echo >> "$GI"
+for pat in "ghe/" ".claude/worktrees/" ".claude/settings.local.json"; do
+  grep -qxF "$pat" "$GI" || { [[ -n "${GI_HDR:-}" ]] || { echo "# graph-harness-engineering (local only)" >> "$GI"; GI_HDR=1; }; echo "$pat" >> "$GI"; }
+done
+if git -C "$TARGET" rev-parse --is-inside-work-tree >/dev/null 2>&1 && [[ -n "$(git -C "$TARGET" ls-files ghe 2>/dev/null)" ]]; then
+  echo "[ghe-init] warning: ghe/ files are already tracked by git; run: git rm -r --cached ghe"
+fi
 chmod +x "$TARGET"/.claude/hooks/*.py "$TARGET"/ghe/runner/*.py
 echo "[ghe-init] installed into $TARGET"
 echo "[ghe-init] next: open Claude Code there, run /ghe-setup, then /ghe-run \"<ticket|file|prompt>\""

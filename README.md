@@ -60,6 +60,9 @@ Tips: keep each request to one coherent feature. Quote exact requirements, becau
 
 Run state lives in `ghe/runs/<run-id>/` (`state.json`, `graph.resolved.yaml`, `artifacts/`, `nodes/`). Bounded retries, a 1M-token ceiling and no-progress detection stop runaway loops. When a run stops, the escalation report says why.
 
+## Git: what GHE ignores
+`ghe-init` (and `/ghe-setup`, which re-checks) adds these lines to the project's `.gitignore`, without duplicating them: `ghe/`, `.claude/worktrees/`, `.claude/settings.local.json`. The `ghe/` folder holds your config, the runner, run state and memory, so it stays local. If `ghe/` was already committed, `ghe-init` warns you to run `git rm -r --cached ghe`. Note: `.claude/` (agents, skills, hooks) is not ignored, and its hooks call `ghe/runner/`, so teammates need to run `bin/ghe-init` too.
+
 ## Claude Code trust note
 Run `claude` interactively in the project once and accept the trust dialog. In an untrusted workspace the project hooks and permissions in `.claude/settings.json` are ignored.
 
