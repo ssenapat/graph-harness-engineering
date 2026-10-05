@@ -16,6 +16,26 @@ cd /path/to/project && pip install pyyaml
 ```
 `ghe-init` copies agents, skills, hooks, rules, the runner, templates and schemas. It never overwrites an existing `.claude/settings.json` or `ghe/config.yaml` unless you pass `--force`. Then open Claude Code in the project and run `/ghe-setup` once. It detects the stack, fills `validation.commands` (test/lint/typecheck/build) and asks for your Jira site, project key and board in `ghe/config.yaml`. The shipped config holds only placeholders (`https://<your-org>.atlassian.net`, `<JIRA_PROJECT_KEY>`), and `tracker` defaults to `local` until you configure Jira. No tokens, cloud ids, account ids or AWS values are stored in any file.
 
+## Install as a Claude Code plugin (alternative)
+
+GHE is also packaged as a plugin, so you can use it without copying files into each project:
+
+```
+/plugin marketplace add ssenapat/graph-harness-engineering
+/plugin install ghe@graph-harness-engineering
+```
+
+Then, in the project you want to work on:
+
+1. `/ghe:setup` runs the bootstrap first (creates `ghe/config.yaml`, `ghe/graph.yaml`, `ghe/memory/` and the GHE lines in `.gitignore`; it never overwrites existing files), then detects your validation commands and Jira project.
+2. `/ghe:run GHE-123` (or a file path, or free text) starts a run. `/ghe:status` shows progress.
+
+Differences from the copy-in install: the skills are namespaced (`/ghe:run`, not `/ghe-run`), and the guard and lint hooks come from the plugin, so there is no `.claude/settings.json` to merge. The project keeps only `ghe/` (local, git-ignored).
+
+For local development of the toolkit itself, `claude --plugin-dir ./plugin` loads the plugin straight from this checkout.
+
+`plugin/` is generated from `.claude/` and `ghe/`. Never edit it by hand: change the sources and run `bin/ghe-build-plugin` (`--check` fails if `plugin/` is out of date; a test enforces this).
+
 ## Create a new project
 1. `bin/ghe-init ./my-app`, then `cd my-app` and `pip install pyyaml`.
 2. In Claude Code: `/ghe-setup`.

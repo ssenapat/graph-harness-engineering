@@ -1,0 +1,229 @@
+#!/usr/bin/env python3
+"""Build the Claude Code plugin (plugin/) from the toolkit sources.
+
+The sources in .claude/ (agents, skills, hooks, rules), ghe/, templates/ and schemas/ stay the single
+source of truth, used as-is by `bin/ghe-init`. This script derives the plugin form from them:
+
+  * skills/, agents/        .claude/skills, .claude/agents, with paths rewritten to ${CLAUDE_PLUGIN_ROOT}
+                            (runner, rules, templates, schemas). Skills ghe-run / ghe-setup / ghe-status
+                            become run / setup / status, so they are invoked as /ghe:run, /ghe:setup, /ghe:status.
+  * hooks/                  the hook scripts + hooks.json derived from .claude/settings.json
+  * rules/ templates/ schemas/   copied (agents and skills read them from the plugin directory)
+  * ghe/runner/ghe_tool.py  copied byte-for-byte; ghe/defaults/{config,graph}.yaml are the defaults that
+                            `ghe_tool.py bootstrap` (run by /ghe:setup) copies into the user's project
+  * .claude-plugin/plugin.json
+
+Nothing in plugin/ is edited by hand: run this script and commit the result
+(tests/test_plugin.py fails if plugin/ is out of date).
+
+Usage:  bin/ghe-build-plugin [--out DIR]      build (default: <repo>/plugin)
+        bin/ghe-build-plugin --check          exit 1 if the committed plugin/ differs from a fresh build
+"""
+import argparse
+import filecmp
+import json
+import os
+import re
+import shutil
+import sys
+import tempfile
+
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+PLUGIN_NAME = "ghe"
+REPO_URL = "https://github.com/ssenapat/graph-harness-engineering"
+SKILL_RENAMES = {"ghe-run": "run", "ghe-setup": "setup", "ghe-status": "status"}
+ROOT_VAR = "${CLAUDE_PLUGIN_ROOT}"
+IGNORE = shutil.ignore_patterns("__pycache__", "*.pyc", ".DS_Store", ".gitkeep")
+
+
+# --------------------------------------------------------------------------- text rewriting
+def rewrite(text: str) -> str:
+    # runner: `python3 ghe/runner/ghe_tool.py` -> quoted absolute plugin path (the path may contain spaces)
+    text = text.replace("python3 ghe/runner/ghe_tool.py", f'python3 "{ROOT_VAR}/ghe/runner/ghe_tool.py"')
+    text = re.sub(r"(?<![\w/{}.-])ghe/runner/ghe_tool\.py", f"{ROOT_VAR}/ghe/runner/ghe_tool.py", text)
+    # toolkit-owned read-only files now live in the plugin directory
+    text = re.sub(r"\.claude/(rules|skills|agents|hooks)/", lambda m: f"{ROOT_VAR}/{m.group(1)}/", text)
+    for old_name, new_name in SKILL_RENAMES.items():
+        text = text.replace(f"{ROOT_VAR}/skills/{old_name}/", f"{ROOT_VAR}/skills/{new_name}/")
+    text = re.sub(r"(?<![\w/.{}-])(templates|schemas)/", lambda m: f"{ROOT_VAR}/{m.group(1)}/", text)
+    # skill names are namespaced by the plugin
+    text = re.sub(r"(?<![\w/.-])/ghe-(run|setup|status)\b", r"/ghe:\1", text)
+    return text
+
+
+LEFTOVERS = [
+    (re.compile(r"\.claude/(skills|agents|rules|hooks)/"), "reference to a .claude/ toolkit path"),
+    (re.compile(r"python3 ghe/runner/ghe_tool\.py"), "unrewritten runner invocation"),
+    (re.compile(r"(?<![\w/{}.-])ghe/runner/ghe_tool\.py"), "unrewritten runner path"),
+    (re.compile(r"(?<![\w/.{}-])(templates|schemas)/"), "unrewritten templates/ or schemas/ path"),
+    (re.compile(r"(?<![\w/.-])/ghe-(run|setup|status)\b"), "unrewritten slash-command name"),
+]
+
+
+def check_leftovers(root: str) -> None:
+    problems = []
+    for dirpath, _, files in os.walk(root):
+        for f in files:
+            if not f.endswith(".md") or f == "README.md":
+                continue
+            path = os.path.join(dirpath, f)
+            with open(path, encoding="utf-8") as fh:
+                for n, line in enumerate(fh, 1):
+                    for rx, why in LEFTOVERS:
+                        if rx.search(line):
+                            problems.append(f"{os.path.relpath(path, root)}:{n}: {why}: {line.strip()[:100]}")
+    if problems:
+        sys.exit("plugin build failed - paths not rewritten:\n  " + "\n  ".join(problems))
+
+
+# --------------------------------------------------------------------------- build steps
+def read(*parts):
+    with open(os.path.join(REPO, *parts), encoding="utf-8") as fh:
+        return fh.read()
+
+
+def write(out, rel, text):
+    path = os.path.join(out, rel)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8", newline="\n") as fh:
+        fh.write(text)
+
+
+def copy_file(out, src_rel, dst_rel):
+    dst = os.path.join(out, dst_rel)
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    shutil.copyfile(os.path.join(REPO, src_rel), dst)
+    shutil.copymode(os.path.join(REPO, src_rel), dst)
+
+
+def build_skills(out):
+    base = os.path.join(REPO, ".claude", "skills")
+    for name in sorted(os.listdir(base)):
+        src = os.path.join(base, name)
+        if not os.path.isdir(src):
+            continue
+        new = SKILL_RENAMES.get(name, name)
+        for dirpath, dirs, files in os.walk(src):
+            dirs[:] = sorted(d for d in dirs if d != "__pycache__")
+            for f in sorted(files):
+                rel = os.path.relpath(os.path.join(dirpath, f), src)
+                with open(os.path.join(dirpath, f), encoding="utf-8") as fh:
+                    text = fh.read()
+                if f == "SKILL.md" and rel == "SKILL.md":
+                    text, n = re.subn(rf"(?m)^name:\s*{re.escape(name)}\s*$", f"name: {new}", text, count=1)
+                    if n != 1:
+                        sys.exit(f"skill {name}: no 'name: {name}' line in frontmatter")
+                write(out, os.path.join("skills", new, rel), rewrite(text))
+
+
+def build_agents(out):
+    base = os.path.join(REPO, ".claude", "agents")
+    for f in sorted(os.listdir(base)):
+        if f.endswith(".md"):
+            write(out, os.path.join("agents", f), rewrite(read(".claude", "agents", f)))
+
+
+def build_hooks(out):
+    base = os.path.join(REPO, ".claude", "hooks")
+    for f in sorted(os.listdir(base)):
+        if f.endswith(".py"):
+            copy_file(out, os.path.join(".claude", "hooks", f), os.path.join("hooks", f))
+    settings = json.loads(read(".claude", "settings.json"))
+    text = json.dumps({"hooks": settings["hooks"]}, indent=2)
+    text = text.replace("$CLAUDE_PROJECT_DIR/.claude/hooks/", f"{ROOT_VAR}/hooks/")
+    if "CLAUDE_PROJECT_DIR" in text or ".claude/hooks" in text:
+        sys.exit("hooks.json: a hook command still points into the project")
+    write(out, os.path.join("hooks", "hooks.json"), text + "\n")
+
+
+def build_static(out):
+    for d in ("rules", "templates", "schemas"):
+        src = os.path.join(REPO, ".claude", "rules") if d == "rules" else os.path.join(REPO, d)
+        dst = os.path.join(out, d)
+        shutil.copytree(src, dst, ignore=IGNORE)
+        if d == "rules":  # rules are plain markdown; same path rewriting as the agents that read them
+            for f in sorted(os.listdir(dst)):
+                if f.endswith(".md"):
+                    p = os.path.join(dst, f)
+                    with open(p, encoding="utf-8") as fh:
+                        t = fh.read()
+                    with open(p, "w", encoding="utf-8", newline="\n") as fh:
+                        fh.write(rewrite(t))
+    copy_file(out, os.path.join("ghe", "runner", "ghe_tool.py"), os.path.join("ghe", "runner", "ghe_tool.py"))
+    for f in ("config.yaml", "graph.yaml"):
+        copy_file(out, os.path.join("ghe", f), os.path.join("ghe", "defaults", f))
+    copy_file(out, "LICENSE", "LICENSE")
+
+
+def build_manifest(out):
+    version = read("VERSION").strip()
+    manifest = {
+        "name": PLUGIN_NAME,
+        "version": version,
+        "description": "Graph Harness Engineering: turns a requirement (Jira ticket, file or prompt) into a working, "
+                       "deployed project using a deterministic graph of specialist agents, bounded retries, "
+                       "token budgets and human gates.",
+        "author": {"name": "ssenapat"},
+        "homepage": REPO_URL,
+        "repository": REPO_URL,
+        "license": "MIT" if "MIT License" in read("LICENSE") else "SEE LICENSE",
+        "keywords": ["harness", "agents", "workflow", "jira", "graph", "orchestration"],
+    }
+    write(out, os.path.join(".claude-plugin", "plugin.json"), json.dumps(manifest, indent=2) + "\n")
+
+
+README = """# ghe (Graph Harness Engineering) - Claude Code plugin
+
+GENERATED by `bin/ghe-build-plugin` from the toolkit sources - do not edit by hand.
+
+Install:  `/plugin marketplace add ssenapat/graph-harness-engineering` then `/plugin install ghe@graph-harness-engineering`
+
+Use (in the project you want to work on):  `/ghe:setup` once, then `/ghe:run <jira-key | path/to/spec.md | free text>`; `/ghe:status` any time.
+
+Full documentation: %s
+""" % REPO_URL
+
+
+def build(out):
+    if os.path.exists(out):
+        shutil.rmtree(out)
+    os.makedirs(out)
+    build_manifest(out)
+    build_skills(out)
+    build_agents(out)
+    build_hooks(out)
+    build_static(out)
+    write(out, "README.md", README)
+    check_leftovers(out)
+
+
+def same(a, b):
+    cmp = filecmp.dircmp(a, b)
+    if cmp.left_only or cmp.right_only or cmp.funny_files:
+        return False
+    _, mismatch, errors = filecmp.cmpfiles(a, b, cmp.common_files, shallow=False)
+    if mismatch or errors:
+        return False
+    return all(same(os.path.join(a, d), os.path.join(b, d)) for d in cmp.common_dirs)
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--out", default=os.path.join(REPO, "plugin"))
+    ap.add_argument("--check", action="store_true", help="compare a fresh build with the committed plugin/")
+    a = ap.parse_args()
+    if a.check:
+        with tempfile.TemporaryDirectory() as tmp:
+            fresh = os.path.join(tmp, "plugin")
+            build(fresh)
+            if not os.path.isdir(a.out) or not same(fresh, a.out):
+                print("plugin/ is out of date - run bin/ghe-build-plugin and commit the result", file=sys.stderr)
+                sys.exit(1)
+        print("plugin/ is up to date")
+        return
+    build(a.out)
+    print(f"built {os.path.relpath(a.out)}")
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,19 @@
+{
+  "name": "ghe",
+  "version": "0.1.0",
+  "description": "Graph Harness Engineering: turns a requirement (Jira ticket, file or prompt) into a working, deployed project using a deterministic graph of specialist agents, bounded retries, token budgets and human gates.",
+  "author": {
+    "name": "ssenapat"
+  },
+  "homepage": "https://github.com/ssenapat/graph-harness-engineering",
+  "repository": "https://github.com/ssenapat/graph-harness-engineering",
+  "license": "MIT",
+  "keywords": [
+    "harness",
+    "agents",
+    "workflow",
+    "jira",
+    "graph",
+    "orchestration"
+  ]
+}

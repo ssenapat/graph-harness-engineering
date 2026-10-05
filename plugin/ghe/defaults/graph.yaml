@@ -1,0 +1,34 @@
+# ghe/graph.yaml — the default graph as DATA (spec §5). The runner reads this; no LLM decides order.
+version: 1
+nodes:
+  discover:    {agent: null,      skill: discover,    needs: [],                          produces: [source.md]}
+  ba:          {agent: ba,        skill: requirements, needs: [discover],                 produces: [requirement-spec.md]}
+  architect:   {agent: architect, skill: design,      needs: [ba],                        produces: [hld.md, lld.md, CONTRACT.md]}
+  review-gate: {agent: null,      gate: true,         needs: [architect],                 produces: [gate-decision.json]}
+  qa:          {agent: qa,        skill: test-design, needs: [architect],                 produces: [test-cases.md, test-cases.json]}
+  builder:     {agent: builder,   skill: story-planner, needs: [architect],               produces: [plans/stories.json, build-report.md]}
+  devops-prep: {agent: devops,    skill: deploy,      needs: [architect], optional: true, produces: [infra-prep-report.md]}
+  deploy:      {agent: devops,    skill: deploy,      needs: [builder, devops-prep],      produces: [deploy-report.md]}
+  test:        {agent: tester,    skill: test-run,    needs: [deploy, qa],                produces: [test-results.json, test-results.md]}
+  final-report: {agent: null,     needs: [test],                                          produces: [RUN-REPORT.md]}
+# Loop (runner-owned, bounded by config budgets): test -> triage(architect) -> fix(builder/qa/devops) -> deploy -> test
+loop:
+  trigger: test_failures
+  triage: {agent: architect, skill: triage}
+  max_rounds: 3
+  stop_on_no_progress: true
+# Roster resolution (spec §5.3): what to do when an agent is omitted.
+roster_rules:
+  default_roster: [ba, architect, qa, builder, devops, tester]
+  reviewer_adds: [review-gate]
+  omit:
+    qa:        {drop_nodes: [qa, test], warn: "No QA: Tester dropped; Builder validation.commands are the only quality check"}
+    tester:    {drop_nodes: [test],     warn: "No Tester: test cases delivered but not executed; run ends at deploy"}
+    devops:    {drop_nodes: [deploy, devops-prep], warn: "No DevOps: nothing deployed; Tester (if present) uses the build report run command"}
+    architect: {drop_nodes: [architect], only_if_tag: small, warn: "No Architect: no contract; parallel builds are unsafe"}
+    ba:        {drop_nodes: [ba],       require: valid_requirement_spec}
+    builder:   {reject: true, reason: "Nothing to build (use maintain mode for review-only runs)"}
+modes:
+  new:      {}
+  existing: {architect_variant: impact-analysis, discover_variant: repo-survey}
+  maintain: {drop_nodes: [devops-prep], ba_variant: light, architect_only_if_tag: design-impact}

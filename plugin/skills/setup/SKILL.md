@@ -1,10 +1,10 @@
 ---
-name: ghe-setup
+name: setup
 description: One-time per project. Detect the project's test/lint/typecheck/build commands, fill ghe/config.yaml (validation + lint), and confirm the Jira project and tracker mode.
 allowed-tools: Read, Write, Edit, Glob, Grep, Bash, AskUserQuestion
 ---
 # ghe-setup
-0. If `ghe/config.yaml` or `ghe/graph.yaml` is missing (the usual case when GHE is installed as a plugin), run `python3 ghe/runner/ghe_tool.py bootstrap` first. It copies the default config and graph (never overwrites an existing file), creates `ghe/runs` and `ghe/memory`, and adds the GHE lines to `.gitignore`. Safe to re-run.
+0. If `ghe/config.yaml` or `ghe/graph.yaml` is missing (the usual case when GHE is installed as a plugin), run `python3 "${CLAUDE_PLUGIN_ROOT}/ghe/runner/ghe_tool.py" bootstrap` first. It copies the default config and graph (never overwrites an existing file), creates `ghe/runs` and `ghe/memory`, and adds the GHE lines to `.gitignore`. Safe to re-run.
 1. Detect stack from files (`package.json` scripts, `pyproject.toml`/`pytest.ini`, `go.mod`, `Cargo.toml`, `Makefile`, `terraform/`). Propose `validation.commands` (test, lint, typecheck, build) and `lint.rules` (`[{glob, command with {file}}]`). Never invent a command that does not exist; an empty list is better than a wrong one.
 2. Confirm with the user (`AskUserQuestion`): tracker `jira` or `local` (default `local`); `deploy_target` default; whether the Reviewer gate is on. If `jira`: ask for the Jira site URL (`https://<org>.atlassian.net`), the project key and optionally the board id, then write them to `jira.*`. Never assume or copy values from another project. Do not store tokens, cloud ids or account ids anywhere: auth is the Atlassian MCP (`/mcp`).
 3. Write only those keys (tracker, jira.site/project/board_id, validation, lint, defaults, gates) into `ghe/config.yaml` (preserve the rest and comments).

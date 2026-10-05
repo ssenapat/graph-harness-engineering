@@ -1,0 +1,19 @@
+{
+  "name": "graph-harness-engineering",
+  "owner": {
+    "name": "ssenapat"
+  },
+  "metadata": {
+    "description": "Graph Harness Engineering plugin marketplace"
+  },
+  "plugins": [
+    {
+      "name": "ghe",
+      "source": "./plugin",
+      "version": "0.1.0",
+      "description": "Turns a requirement (Jira ticket, file or prompt) into a working, deployed project using a deterministic graph of specialist agents, bounded retries, token budgets and human gates.",
+      "category": "development",
+      "homepage": "https://github.com/ssenapat/graph-harness-engineering"
+    }
+  ]
+}

@@ -1,0 +1,47 @@
+# ghe/config.yaml — per-project GHE configuration (spec §10.4)
+tracker: local           # jira | local. /ghe-setup switches to jira once the values below are filled in
+jira:                    # placeholders: set per project by /ghe-setup. Never commit real org values to a shared toolkit.
+  site: "https://<your-org>.atlassian.net"
+  project: "<JIRA_PROJECT_KEY>"   # the skill refuses to write to any other project
+  board_id: null         # optional (numeric)
+  epic_type: Epic
+  task_type: Task
+defaults:
+  roster: [ba, architect, qa, builder, devops, tester]   # Reviewer is opt-in
+  deploy_target: local   # local | cloud
+  max_parallel_agents: 4
+  test_concurrency: 4
+budgets:
+  max_tokens_per_run: 1000000        # hard ceiling; counts in + out + cache write + cache read
+  max_tokens_per_node:               # sums to 860k; 140k reserved for fix rounds
+    ba: 60000
+    architect: 120000
+    qa: 80000
+    builder: 400000
+    devops: 80000
+    tester: 120000
+  reserve_for_fix_rounds: 140000
+  compaction:
+    node_context_threshold: 0.70     # compact a node's context at 70% of its node budget
+    run_soft_threshold: 0.80         # at 800k compact shared state, defer optional work, warn
+  max_rounds: 3                      # test -> triage -> fix rounds
+  max_story_revisions: 2
+  max_gate_revisions: 2
+  node_retry: 1
+models:                              # tiers: top | mid | small  (mapped by the runner)
+  architect: top
+  builder_planner: top
+  builder_integration: top
+  default: mid
+  mechanical: small
+validation:
+  commands: []                       # filled by /ghe-setup (test / lint / typecheck / build)
+lint:
+  rules: []                          # [{glob: "*.py", command: "ruff check {file}"}]
+gates:
+  reviewer: false
+  cloud_apply: true
+  destructive: true
+aws: {}                              # no defaults: region/account/credentials come from the requester per run
+docs_vault:
+  enabled: false

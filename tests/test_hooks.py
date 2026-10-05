@@ -5,7 +5,15 @@ import pytest
 HOOKS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".claude", "hooks")
 
 
-def run(hook, payload, root):
+GATED = ("ghe_guard.py", "security_guard.py")  # these stay silent unless the project has ghe/config.yaml
+
+
+def run(hook, payload, root, ghe_project=True):
+    if ghe_project and hook in GATED:
+        cfg = os.path.join(str(root), "ghe", "config.yaml")
+        if not os.path.exists(cfg):
+            os.makedirs(os.path.dirname(cfg), exist_ok=True)
+            open(cfg, "w").close()
     env = {**os.environ, "CLAUDE_PROJECT_DIR": str(root)}
     return subprocess.run([sys.executable, os.path.join(HOOKS, hook)], input=json.dumps(payload),
                           capture_output=True, text=True, env=env, cwd=root)
@@ -72,3 +80,40 @@ def test_runner_name_does_not_exempt_chained_writes(tmp_path, cmd):
 
 def test_plain_runner_call_still_allowed(tmp_path):
     assert bash(tmp_path, "python3 ghe/runner/ghe_tool.py status --run ghe/runs/r1") == 0
+
+
+# ---- plugin-mode behaviour --------------------------------------------------------------------
+@pytest.mark.parametrize("hook,payload", [
+    ("ghe_guard.py", {"tool_name": "Bash", "tool_input": {"command": "terraform apply -auto-approve"}}),
+    ("ghe_guard.py", {"tool_name": "Write", "tool_input": {"file_path": "ghe/runs/r1/state.json"}}),
+    ("security_guard.py", {"tool_name": "Bash", "tool_input": {"command": "git push --force origin main"}}),
+])
+def test_guards_stay_silent_outside_a_ghe_project(tmp_path, hook, payload):
+    """Installed as a plugin, the hooks load in every project; they must not touch non-GHE ones."""
+    r = run(hook, payload, tmp_path, ghe_project=False)
+    assert r.returncode == 0 and r.stderr == ""
+
+
+def test_security_guard_still_blocks_inside_a_ghe_project(tmp_path):
+    r = run("security_guard.py", {"tool_name": "Bash", "tool_input": {"command": "git push --force origin main"}}, tmp_path)
+    assert r.returncode == 2
+
+
+@pytest.mark.parametrize("cmd", [
+    'python3 "/home/u/.claude/plugins/cache/ghe/ghe/1.0.0/ghe/runner/ghe_tool.py" status --run ghe/runs/r1',
+    'python3 /home/u/.claude/plugins/cache/ghe/ghe/1.0.0/ghe/runner/ghe_tool.py status --run ghe/runs/r1',
+    'python3 "/Users/jo bloggs/.claude/plugins/ghe/ghe/runner/ghe_tool.py" tokens --run ghe/runs/r1 --node a --add 5',
+])
+def test_plugin_path_runner_call_is_a_plain_runner_call(tmp_path, cmd):
+    (tmp_path / "ghe" / "runs" / "r1").mkdir(parents=True)
+    assert bash(tmp_path, cmd) == 0
+
+
+@pytest.mark.parametrize("cmd", [
+    'python3 "/p/ghe/runner/ghe_tool.py" status; sed -i s/a/b/ ghe/runs/r1/state.json',
+    'python3 /p/ghe/runner/ghe_tool.py status --run ghe/runs/r1/state.json > ghe/runs/r1/state.json',
+    'python3 "/p/ghe/runner/ghe_tool.py" status && echo {} > ghe/runs/r1/state.json',
+])
+def test_plugin_path_does_not_exempt_chained_writes(tmp_path, cmd):
+    (tmp_path / "ghe" / "runs" / "r1").mkdir(parents=True)
+    assert bash(tmp_path, cmd) == 2
