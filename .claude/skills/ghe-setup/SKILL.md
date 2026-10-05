@@ -5,6 +5,6 @@ allowed-tools: Read, Write, Edit, Glob, Grep, Bash, AskUserQuestion
 ---
 # ghe-setup
 1. Detect stack from files (`package.json` scripts, `pyproject.toml`/`pytest.ini`, `go.mod`, `Cargo.toml`, `Makefile`, `terraform/`). Propose `validation.commands` (test, lint, typecheck, build) and `lint.rules` (`[{glob, command with {file}}]`). Never invent a command that does not exist; an empty list is better than a wrong one.
-2. Confirm with the user (`AskUserQuestion`): keep tracker `jira` (project GHE) or switch to `local`; `deploy_target` default; whether the Reviewer gate is on.
-3. Write only those keys into `ghe/config.yaml` (preserve the rest and comments).
+2. Confirm with the user (`AskUserQuestion`): tracker `jira` or `local` (default `local`); `deploy_target` default; whether the Reviewer gate is on. If `jira`: ask for the Jira site URL (`https://<org>.atlassian.net`), the project key and optionally the board id, then write them to `jira.*`. Never assume or copy values from another project. Do not store tokens, cloud ids or account ids anywhere: auth is the Atlassian MCP (`/mcp`).
+3. Write only those keys (tracker, jira.site/project/board_id, validation, lint, defaults, gates) into `ghe/config.yaml` (preserve the rest and comments).
 4. Run each validation command once to confirm it works; report failures instead of leaving broken commands in.

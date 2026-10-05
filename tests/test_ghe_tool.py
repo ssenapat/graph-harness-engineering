@@ -16,7 +16,11 @@ TOOL = os.path.join(REPO, "ghe", "runner", "ghe_tool.py")
 def proj(tmp_path):
     root = tmp_path / "proj"
     (root / "ghe").mkdir(parents=True)
-    shutil.copy(os.path.join(REPO, "ghe", "config.yaml"), root / "ghe" / "config.yaml")
+    cfg = open(os.path.join(REPO, "ghe", "config.yaml")).read()
+    cfg = (cfg.replace("tracker: local ", "tracker: jira  ", 1)
+              .replace("https://<your-org>.atlassian.net", "https://example.atlassian.net")
+              .replace("<JIRA_PROJECT_KEY>", "GHE"))
+    (root / "ghe" / "config.yaml").write_text(cfg)
     shutil.copy(os.path.join(REPO, "ghe", "graph.yaml"), root / "ghe" / "graph.yaml")
     return root
 
@@ -253,3 +257,18 @@ def test_resolve_wait_clears_waiting_without_burning_retry(proj):
     assert rc == 0 and d["attempt"] == 1
     d, rc = t(proj, "resolve-wait", "--run", run, "--node", "ba")
     assert rc == 1 and "not waiting_human" in d["error"]
+
+
+def test_placeholder_jira_config_is_refused(tmp_path):
+    root = tmp_path / "p2"
+    (root / "ghe").mkdir(parents=True)
+    cfg = open(os.path.join(REPO, "ghe", "config.yaml")).read().replace("tracker: local ", "tracker: jira  ", 1)
+    (root / "ghe" / "config.yaml").write_text(cfg)
+    shutil.copy(os.path.join(REPO, "ghe", "graph.yaml"), root / "ghe" / "graph.yaml")
+    d, rc = t(root, "init", "--run-id", "r1")
+    assert rc == 2 and "/ghe-setup" in d["error"]
+
+
+def test_shipped_config_has_no_personal_values():
+    cfg = open(os.path.join(REPO, "ghe", "config.yaml")).read()
+    assert "senapathi" not in cfg and "tracker: local" in cfg and "<JIRA_PROJECT_KEY>" in cfg

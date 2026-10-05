@@ -111,7 +111,25 @@ class Ctx:
 
 
 # ----------------------------------------------------------------- init
+def jira_config_problems(config):
+    """Return a list of problems if tracker is jira but the jira block is still placeholders/invalid."""
+    if config.get("tracker") != "jira":
+        return []
+    j = config.get("jira") or {}
+    site, proj = str(j.get("site") or ""), str(j.get("project") or "")
+    problems = []
+    if not re.match(r"^https://[A-Za-z0-9.-]+\.atlassian\.net/?$", site) or "<" in site:
+        problems.append(f"jira.site is not set ({site or 'empty'})")
+    if not re.match(r"^[A-Z][A-Z0-9]+$", proj):
+        problems.append(f"jira.project is not a valid project key ({proj or 'empty'})")
+    return problems
+
+
 def cmd_init(a, c):
+    bad = jira_config_problems(c.config)
+    if bad:
+        out({"ok": False, "error": "tracker is jira but ghe/config.yaml is not configured: " + "; ".join(bad)
+             + ". Run /ghe-setup (or set tracker: local)."}, 2)
     runs = os.path.join(c.root, "ghe", "runs")
     os.makedirs(runs, exist_ok=True)
     day = datetime.date.today().isoformat()
@@ -485,6 +503,9 @@ def cmd_ticket(a, c):
             out({"ok": False, "error": "tracker is jira: pass --key with the key returned by Jira"}, 2)
         a.key = f"LOCAL-{len(reg) + 1}"
     if c.config.get("tracker") == "jira":
+        bad = jira_config_problems(c.config)
+        if bad:
+            out({"ok": False, "error": "jira not configured: " + "; ".join(bad) + ". Run /ghe-setup."}, 2)
         proj = c.config["jira"]["project"]
         if not re.match(rf"^{re.escape(proj)}-\d+$", a.key):
             out({"ok": False, "error": f"refusing key {a.key}: only project {proj} is allowed (spec §13)"}, 1)

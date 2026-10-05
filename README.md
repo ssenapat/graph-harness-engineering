@@ -14,7 +14,7 @@ The graph is data (`ghe/graph.yaml`). A small Python runner (`ghe/runner/ghe_too
 bin/ghe-init /path/to/project              # works for an empty folder or an existing repo
 cd /path/to/project && pip install pyyaml
 ```
-`ghe-init` copies agents, skills, hooks, rules, the runner, templates and schemas. It never overwrites an existing `.claude/settings.json` or `ghe/config.yaml` unless you pass `--force`. Then open Claude Code in the project and run `/ghe-setup` once. It detects the stack, fills `validation.commands` (test/lint/typecheck/build) and the Jira project and board in `ghe/config.yaml`.
+`ghe-init` copies agents, skills, hooks, rules, the runner, templates and schemas. It never overwrites an existing `.claude/settings.json` or `ghe/config.yaml` unless you pass `--force`. Then open Claude Code in the project and run `/ghe-setup` once. It detects the stack, fills `validation.commands` (test/lint/typecheck/build) and asks for your Jira site, project key and board in `ghe/config.yaml`. The shipped config holds only placeholders (`https://<your-org>.atlassian.net`, `<JIRA_PROJECT_KEY>`), and `tracker` defaults to `local` until you configure Jira. No tokens, cloud ids, account ids or AWS values are stored in any file.
 
 ## Create a new project
 1. `bin/ghe-init ./my-app`, then `cd my-app` and `pip install pyyaml`.
@@ -64,7 +64,7 @@ Run state lives in `ghe/runs/<run-id>/` (`state.json`, `graph.resolved.yaml`, `a
 Run `claude` interactively in the project once and accept the trust dialog. In an untrusted workspace the project hooks and permissions in `.claude/settings.json` are ignored.
 
 ## Key properties
-- Jira project **GHE** is the system of record (epic per run, tickets per agent/story).
+- With `tracker: jira`, your configured Jira project (`jira.project`) is the system of record (epic per run, tickets per agent/story). The default is `tracker: local`.
 - Hard ceiling **1,000,000 tokens** per run. At 70% of a node's cap (and 80% of the run) context is compacted; a drift check proves the summary still matches the verbatim request and requirement IDs.
 - Parallel stories only with disjoint `owns` globs, each in its own git worktree.
 - Bounded retries; identical failures escalate as "no progress" instead of looping.
