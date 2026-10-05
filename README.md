@@ -4,15 +4,64 @@ A Claude Code toolkit that turns a requirement (Jira ticket, file, or prompt) in
 
 The graph is data (`ghe/graph.yaml`). A small Python runner (`ghe/runner/ghe_tool.py`) decides what runs next, enforces budgets, detects non-progress, and checks drift. The LLM never decides control flow.
 
-## Quick start
+## Prerequisites
+- Claude Code, Python 3.9+, `pip install pyyaml`, git.
+- Jira tracker (optional): authenticate the Atlassian MCP with `/mcp`. Without it, set `tracker: local` in `ghe/config.yaml`.
+- Cloud deploys only: AWS region and credentials, supplied by whoever makes the request (env vars, `AWS_PROFILE`, or SSO). GHE never defaults a region or stores credentials.
+
+## Install into a project (both scenarios)
 ```bash
-bin/ghe-init /path/to/your/project        # copies agents, skills, hooks, runner, templates
-cd /path/to/your/project && pip install pyyaml
-# in Claude Code:
-/ghe-setup                                 # detect stack, set validation commands
-/ghe-run "GHE-123"                         # or a file path, or free text
-/ghe-status                                # state of the latest run
+bin/ghe-init /path/to/project              # works for an empty folder or an existing repo
+cd /path/to/project && pip install pyyaml
 ```
+`ghe-init` copies agents, skills, hooks, rules, the runner, templates and schemas. It never overwrites an existing `.claude/settings.json` or `ghe/config.yaml` unless you pass `--force`. Then open Claude Code in the project and run `/ghe-setup` once. It detects the stack, fills `validation.commands` (test/lint/typecheck/build) and the Jira project and board in `ghe/config.yaml`.
+
+## Create a new project
+1. `bin/ghe-init ./my-app`, then `cd my-app` and `pip install pyyaml`.
+2. In Claude Code: `/ghe-setup`.
+3. Describe what to build. The input can be a Jira key, a file, or free text:
+   ```
+   /ghe-run "Build a todo REST API (Node/Express, in-memory) with a one-page HTML UI. Deploy locally."
+   /ghe-run GHE-123
+   /ghe-run path/to/spec.md
+   ```
+4. The runner walks the graph: `discover -> ba -> architect -> qa -> builder -> deploy -> tester -> final-report`.
+   - `discover` normalises the input into `source.md` (frozen, with a hash).
+   - `ba` writes the requirement spec with `REQ-###` IDs and acceptance criteria.
+   - `architect` writes HLD, LLD and `CONTRACT.md` (the interfaces Builder and QA both follow).
+   - `qa` writes test cases mapped to REQ IDs. `builder` implements stories in parallel git worktrees, and only where their `owns` globs are disjoint.
+   - `deploy` (local by default; cloud via Terraform behind a human gate), then `tester` runs the cases. Failures are triaged and fixed in bounded rounds.
+5. If the status becomes `WAITING_HUMAN`, answer the open question in the CLI or on the Jira ticket, then `/ghe-run --resume <run-id>`.
+6. Read `ghe/runs/<run-id>/artifacts/RUN-REPORT.md` and `traceability-matrix.md`. Check progress any time with `/ghe-status`.
+
+Optional: pass `--reviewer` (or set `reviewer: true` in `ghe/config.yaml`) for a human review gate after the Architect. Default deploy is local; use `--deploy cloud` only when you want it.
+
+## Add features or fix bugs in an existing project
+1. `bin/ghe-init /path/to/repo`, `pip install pyyaml`, then `/ghe-setup`. This is important because the validation commands protect your existing code.
+2. Describe the change. For a bug or small change use maintain mode:
+   ```
+   /ghe-run "Add pagination to GET /todos (limit/offset)" --mode existing
+   /ghe-run "Fix: PUT /todos/:id returns 500 on blank title" --mode maintain
+   ```
+   - `existing`: `discover` surveys the repo (structure, entry points, tests, conventions). The Architect writes an **impact analysis** instead of a full HLD, and the BA writes only the changed or added requirements.
+   - `maintain`: lighter. QA and DevOps are dropped, the Builder works from a small design, and the existing validation commands act as the gate.
+3. Decisions and patterns are appended to `ghe/memory/decisions.md` and `patterns.md` so later runs reuse them.
+4. Review the git branch or worktree merge, plus `RUN-REPORT.md`, before merging to your main branch.
+
+Tips: keep each request to one coherent feature. Quote exact requirements, because the verbatim source is what the drift check compares against. If the repo has no tests, the Builder adds them for the touched code.
+
+## Day to day
+| Command | Use |
+|---|---|
+| `/ghe-setup` | One-time per project. Detect stack, set validation commands and Jira config. |
+| `/ghe-run "<input>"` | Start a run. Flags: `--mode new\|existing\|maintain`, `--roster ba,architect,...`, `--deploy local\|cloud`, `--reviewer`. |
+| `/ghe-run --resume <run-id>` | Continue after a human answer or gate decision. |
+| `/ghe-status` | Nodes, rounds, tokens used (out of 1,000,000), and what is being waited on. |
+
+Run state lives in `ghe/runs/<run-id>/` (`state.json`, `graph.resolved.yaml`, `artifacts/`, `nodes/`). Bounded retries, a 1M-token ceiling and no-progress detection stop runaway loops. When a run stops, the escalation report says why.
+
+## Claude Code trust note
+Run `claude` interactively in the project once and accept the trust dialog. In an untrusted workspace the project hooks and permissions in `.claude/settings.json` are ignored.
 
 ## Key properties
 - Jira project **GHE** is the system of record (epic per run, tickets per agent/story).
