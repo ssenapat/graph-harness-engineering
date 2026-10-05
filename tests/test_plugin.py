@@ -115,7 +115,9 @@ def test_bootstrap_creates_project_files_and_gitignore(tmp_path):
         assert lines.count(want) == 1, want
     # defaults ship placeholders, never real Jira / AWS values
     cfg = (tmp_path / "ghe" / "config.yaml").read_text()
-    assert "senapathisrinivasa" not in cfg and "us-east-1" not in cfg
+    hosts = re.findall(r"https?://([^/\s\"']+)\.atlassian\.net", cfg)
+    assert hosts and all(h.startswith("<") and h.endswith(">") for h in hosts), hosts  # placeholder only
+    assert "<JIRA_PROJECT_KEY>" in cfg and "us-east-1" not in cfg
 
 
 def test_bootstrap_is_idempotent_and_never_overwrites(tmp_path):
