@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# ghe-init — install graph-harness-engineering into a target project.
+# Usage: bin/ghe-init <target-dir> [--force]
+# Copies .claude/{agents,skills,hooks,rules,memory}, ghe/, templates/, schemas/ into <target-dir>.
+# Never overwrites an existing .claude/settings.json or ghe/config.yaml unless --force.
+set -euo pipefail
+SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TARGET=""; FORCE=0
+for arg in "$@"; do
+  case "$arg" in
+    --force) FORCE=1 ;;
+    -h|--help) sed -n '2,5p' "$0"; exit 0 ;;
+    -*) echo "error: unknown option $arg" >&2; exit 1 ;;
+    *) if [[ -z "$TARGET" ]]; then TARGET="$arg"; else echo "error: unexpected argument $arg" >&2; exit 1; fi ;;
+  esac
+done
+[[ -n "$TARGET" ]] || { echo "usage: bin/ghe-init <target-dir> [--force]" >&2; exit 1; }
+[[ "$(cd "$TARGET" 2>/dev/null && pwd || echo "$TARGET")" != "$SRC" ]] || { echo "error: target is the GHE repo itself" >&2; exit 1; }
+command -v python3 >/dev/null || { echo "error: python3 required" >&2; exit 1; }
+python3 -c "import yaml" 2>/dev/null || echo "[ghe-init] warning: PyYAML missing (pip install pyyaml); the runner needs it"
+mkdir -p "$TARGET/.claude" "$TARGET/ghe/runs"
+copy_dir() { mkdir -p "$TARGET/$2"; cp -R "$SRC/$1/." "$TARGET/$2/"; }
+for d in agents skills hooks rules; do copy_dir ".claude/$d" ".claude/$d"; done
+mkdir -p "$TARGET/ghe/memory"
+for f in decisions.md patterns.md; do [[ -f "$TARGET/ghe/memory/$f" ]] || touch "$TARGET/ghe/memory/$f"; done
+copy_dir ghe/runner ghe/runner;
+cp "$SRC/ghe/graph.yaml" "$TARGET/ghe/graph.yaml"
+copy_dir templates templates; copy_dir schemas schemas
+touch "$TARGET/ghe/runs/.gitkeep"
+for f in .claude/settings.json ghe/config.yaml; do
+  if [[ -e "$TARGET/$f" && "$FORCE" != "1" ]]; then echo "[ghe-init] $f exists — left untouched (use --force)"; else cp "$SRC/$f" "$TARGET/$f"; fi
+done
+grep -qs 'ghe/runs' "$TARGET/.gitignore" 2>/dev/null || printf 'ghe/runs/*\n!ghe/runs/.gitkeep\n' >> "$TARGET/.gitignore"
+chmod +x "$TARGET"/.claude/hooks/*.py "$TARGET"/ghe/runner/*.py
+echo "[ghe-init] installed into $TARGET"
+echo "[ghe-init] next: open Claude Code there, run /ghe-setup, then /ghe-run \"<ticket|file|prompt>\""
