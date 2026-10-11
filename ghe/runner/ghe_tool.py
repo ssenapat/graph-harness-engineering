@@ -19,6 +19,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 
 try:
@@ -93,7 +94,7 @@ class Ctx:
         self.run = os.path.abspath(args.run) if getattr(args, "run", None) else None
         cfg_path = os.path.join(self.root, "ghe", "config.yaml")
         graph_path = os.path.join(self.root, "ghe", "graph.yaml")
-        if getattr(args, "cmd", None) == "bootstrap":  # bootstrap is what creates these files
+        if getattr(args, "cmd", None) in ("bootstrap", "repos"):  # bootstrap creates these files; repos runs before setup
             self.config, self.graph = {}, {}
             return
         missing = [p for p in (cfg_path, graph_path) if not os.path.isfile(p)]
@@ -189,6 +190,8 @@ def cmd_bootstrap(a, c):
     text = read(gi) or ""
     have = {ln.strip() for ln in text.splitlines()}
     missing = [ln for ln in GITIGNORE_LINES if not ({ln, ln.rstrip("/"), "/" + ln, "/" + ln.rstrip("/")} & have)]
+    if getattr(a, "workspace", False) and not os.path.exists(os.path.join(c.root, ".git")):
+        missing = []  # a plain workspace folder (not a repo): never drop a .gitignore into it
     if missing:
         block = ("" if not text or text.endswith("\n") else "\n") + "# graph-harness-engineering (local only)\n" + "\n".join(missing) + "\n"
         with open(gi, "a", encoding="utf-8") as fh:
@@ -730,6 +733,157 @@ def cmd_gate_decide(a, c):
 
 
 # ----------------------------------------------------------------- main
+# ----------------------------------------------------------------- multi-repo workspace
+# The directory GHE is run from is the WORKSPACE: it owns ghe/runs and ghe/workspace.yaml. The repos a run
+# works on are found next to it (cwd, then its children, then the parent's children) or cloned (only after
+# the human confirmed the URL and destination). Each repo keeps its own ghe/config.yaml from /ghe:setup.
+URL_RE = re.compile(r"^(https?://[^\s/]+/\S+|ssh://\S+|git@[\w.-]+:\S+)$")
+WS_FILE = os.path.join("ghe", "workspace.yaml")
+
+
+def repo_name(hint):
+    h = hint.strip().rstrip("/")
+    h = re.split(r"[/:]", h)[-1]
+    return h[:-4] if h.endswith(".git") else h
+
+
+def norm_remote(url):
+    u = (url or "").strip().rstrip("/").lower()
+    u = re.sub(r"^(https?://|ssh://)([^@/]+@)?", "", u)
+    u = re.sub(r"^git@", "", u).replace(":", "/", 1) if u.startswith("git@") else u
+    return u[:-4] if u.endswith(".git") else u
+
+
+def git_remote(path):
+    try:
+        r = subprocess.run(["git", "-C", path, "remote", "get-url", "origin"], capture_output=True, text=True, timeout=10)
+        return r.stdout.strip() if r.returncode == 0 else ""
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def is_git(path):
+    return os.path.exists(os.path.join(path, ".git"))
+
+
+def repo_dirs(base):
+    """Git repos that are direct children of base (hidden dirs skipped, no deeper walk)."""
+    try:
+        names = sorted(os.listdir(base))
+    except OSError:
+        return []
+    return [os.path.join(base, n) for n in names
+            if not n.startswith(".") and os.path.isdir(os.path.join(base, n)) and is_git(os.path.join(base, n))]
+
+
+def clone_base(root):
+    """Where clones go: the workspace folder, or its parent when the workspace is itself a repo
+    (never nest a clone inside another repo)."""
+    return os.path.dirname(root) if is_git(root) else root
+
+
+def find_repo(hint, root):
+    hint = hint.strip()
+    url = hint if URL_RE.match(hint) else ""
+    res = {"hint": hint, "name": repo_name(hint), "url": url, "status": "missing", "path": None, "source": None,
+           "candidates": [], "clone_dest": os.path.join(clone_base(root), repo_name(hint)) if url else None}
+    if not url and (os.sep in hint or hint.startswith(("~", "."))):
+        p = os.path.abspath(os.path.join(root, os.path.expanduser(hint)))
+        if os.path.isdir(p):
+            res.update(status="found", path=p, source="path", name=os.path.basename(p))
+        return res
+    name = res["name"].lower()
+    parent = os.path.dirname(root)
+    tiers = [("cwd", [root] if is_git(root) else []), ("cwd-child", repo_dirs(root)), ("parent", repo_dirs(parent))]
+    if parent == root:
+        tiers = tiers[:2]
+
+    def exact(p):
+        if url and git_remote(p) and norm_remote(git_remote(p)) == norm_remote(url):
+            return True
+        return os.path.basename(p).lower() == name
+
+    for label, paths in tiers:
+        hits = [p for p in paths if exact(p)]
+        if len(hits) == 1:
+            res.update(status="found", path=hits[0], source=label)
+            return res
+        if len(hits) > 1:
+            res.update(status="ambiguous", candidates=hits, source=label)
+            return res
+    fuzzy = [p for _, paths in tiers for p in paths
+             if len(name) >= 3 and (name in os.path.basename(p).lower() or os.path.basename(p).lower() in name)
+             and len(os.path.basename(p)) >= 3]
+    if fuzzy:
+        res.update(status="fuzzy", candidates=sorted(set(fuzzy)))
+    return res
+
+
+def load_workspace(root):
+    path = os.path.join(root, WS_FILE)
+    return (load_yaml(path) or {}).get("repos") or [] if os.path.isfile(path) else []
+
+
+def save_workspace(root, repos):
+    path = os.path.join(root, WS_FILE)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        yaml.safe_dump({"repos": repos}, fh, sort_keys=False)
+
+
+def repo_setup_state(path):
+    g = os.path.join(path, "ghe")
+    return os.path.isfile(os.path.join(g, "config.yaml")) and os.path.isfile(os.path.join(g, "graph.yaml"))
+
+
+def register_repo(root, name, path, url="", origin="found"):
+    repos = [r for r in load_workspace(root) if r.get("name") != name]
+    repos.append({"name": name, "path": os.path.abspath(path), "url": url or git_remote(path), "origin": origin})
+    save_workspace(root, repos)
+
+
+def cmd_repos(a, c):
+    act = a.action
+    if act == "find":
+        if not a.hint:
+            out({"ok": False, "error": "repos find needs at least one --hint (repo name, path or clone URL)"}, 2)
+        results = [find_repo(h, c.root) for h in a.hint]
+        for r in results:
+            r["setup"] = repo_setup_state(r["path"]) if r["path"] else None
+        out({"ok": True, "workspace": c.root, "clone_base": clone_base(c.root), "results": results,
+             "unresolved": [r["hint"] for r in results if r["status"] != "found"]})
+    if act == "list":
+        repos = load_workspace(c.root)
+        for r in repos:
+            r["exists"] = os.path.isdir(r["path"])
+            r["setup"] = r["exists"] and repo_setup_state(r["path"])
+        out({"ok": True, "workspace": c.root, "repos": repos, "needs_setup": [r["name"] for r in repos if r["exists"] and not r["setup"]]})
+    if act == "add":
+        if not (a.name and a.path):
+            out({"ok": False, "error": "repos add needs --name and --path"}, 2)
+        p = os.path.abspath(os.path.expanduser(a.path))
+        if not os.path.isdir(p):
+            out({"ok": False, "error": f"not a directory: {p}"}, 2)
+        register_repo(c.root, a.name, p, a.url or "", "found")
+        out({"ok": True, "name": a.name, "path": p, "setup": repo_setup_state(p)})
+    if act == "clone":
+        url = (a.url or "").strip()
+        if not URL_RE.match(url) or url.startswith("-"):
+            out({"ok": False, "error": "refusing to clone: only https://, ssh:// and git@host: URLs are allowed"}, 2)
+        if not a.confirmed:
+            out({"ok": False, "error": "clone needs the human's confirmation of the URL and destination: ask first, then pass --confirmed"}, 2)
+        name = a.name or repo_name(url)
+        dest = os.path.abspath(os.path.expanduser(a.path)) if a.path else os.path.join(clone_base(c.root), name)
+        if os.path.exists(dest):
+            out({"ok": False, "error": f"destination already exists: {dest}. Use it as an existing repo (repos add) or pick another path"}, 2)
+        r = subprocess.run(["git", "clone", "--", url, dest], capture_output=True, text=True, timeout=900)
+        if r.returncode != 0:
+            out({"ok": False, "error": "git clone failed: " + (r.stderr.strip()[-300:] or "unknown error")}, 2)
+        register_repo(c.root, name, dest, url, "cloned")
+        out({"ok": True, "name": name, "path": dest, "url": url, "setup": False})
+    out({"ok": False, "error": f"unknown repos action {act}"}, 2)
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--root")
@@ -745,7 +899,9 @@ def main():
         sp.set_defaults(fn=fn)
 
     add("init", cmd_init, ("--run-id", {}), run=False)
-    add("bootstrap", cmd_bootstrap, run=False)
+    add("bootstrap", cmd_bootstrap, ("--workspace", {"action": "store_true"}), run=False)
+    add("repos", cmd_repos, ("action", {"choices": ["find", "list", "add", "clone"]}), ("--hint", {"action": "append"}),
+        ("--name", {}), ("--path", {}), ("--url", {}), ("--confirmed", {"action": "store_true"}), run=False)
     add("resolve", cmd_resolve)
     add("start", cmd_start, ("--node", {"required": True}))
     add("result", cmd_result, ("--node", {"required": True}), ("--tokens", {"default": 0}))

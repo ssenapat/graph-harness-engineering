@@ -186,3 +186,12 @@ After changing anything under `.claude/` or `ghe/`, run `bin/ghe-build-plugin` a
 ```bash
 python3 -m pytest tests -q
 ```
+
+## Working across repos (workspace mode)
+
+Install the plugin anywhere and run `/ghe:run` from any folder, even one that is not a repo. That folder is the **workspace**: it holds `ghe/runs` and `ghe/workspace.yaml`. The repos a run works on are resolved like this:
+
+1. Repo names, paths or clone URLs in the prompt (`--repo <name|path|url>`, repeatable) win. If the prompt names none, GHE reads them from the Jira ticket. It asks you only when neither does.
+2. Each hint is looked up locally first: the current folder, then its child folders, then the parent folder's children (`ghe_tool.py repos find`).
+3. Ambiguous or fuzzy matches are shown to you. A clone happens only after you confirm the URL and destination (`repos clone --confirmed`). Clones go into the workspace folder, or next to it when the workspace is itself a repo.
+4. Any repo without `ghe/config.yaml` gets `/ghe:setup` run on it (you confirm its test/lint commands) before work starts. Each repo keeps its own validation commands.

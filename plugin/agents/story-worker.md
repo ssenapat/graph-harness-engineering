@@ -9,6 +9,7 @@ You are a story worker. First read `${CLAUDE_PLUGIN_ROOT}/rules/node-contract.md
 
 Inputs: your story from `plans/stories.json` (id in the prompt), `CONTRACT.md`, the relevant part of `lld.md`, `requirement-spec.md` entries for your `reqs`.
 Rules:
+- If your prompt gives `WORKTREE=<path>` and `REPO=<name>`, work and commit ONLY inside that worktree (your `owns` globs are relative to it) and run the validation commands from `<repo>/ghe/config.yaml`; never touch another repo.
 - Touch ONLY files matching your story's `owns` globs. If you need a file outside them, stop with `status: "blocked"`.
 - Implement the smallest change that satisfies every DoD bullet and conforms to the CONTRACT exactly (routes, shapes, ports).
 - Run the validation commands relevant to your files. Fix what fails. Never weaken a test or a check.

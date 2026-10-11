@@ -2,7 +2,7 @@
 name: run
 description: Run the GHE graph for a piece of work (Jira ticket, file, or prompt), or resume a waiting run. Deterministic orchestration - order, retries, budgets and gates are decided by ${CLAUDE_PLUGIN_ROOT}/ghe/runner/ghe_tool.py and graph.yaml, never by your judgement.
 allowed-tools: Read, Write, Edit, Glob, Grep, Bash, Agent, AskUserQuestion, Skill
-argument-hint: <jira key|url | file | "prompt"> [--mode new|existing|maintain] [--roster ba,architect,...] [--deploy local|cloud] [--reviewer] | --resume <run-id>
+argument-hint: <jira key|url | file | "prompt"> [--mode new|existing|maintain] [--roster ba,architect,...] [--deploy local|cloud] [--reviewer] [--repo <name|path|url>]... | --resume <run-id>
 ---
 # ghe-run — the orchestrator (spec §5, §9, §10)
 
@@ -10,7 +10,8 @@ You are the ORCHESTRATOR. You do not design, code or test. You walk the graph. `
 
 ## 0. Start or resume
 - `--resume <run-id>`: `RUN=ghe/runs/<run-id>`; `T status --run $RUN`. If status is `WAITING_HUMAN`, find what is pending (a gate, a node `waiting_human`/`blocked`, open questions), obtain the human's answer (see §6/§7), record it, set the node back to runnable with `T start`, then continue at §3.
-- Otherwise: `T init` → `RUN`. Parse flags. Run the **discover** skill (it writes `source.md` and freezes its hash through `T result --node discover`). With `tracker: jira`, use the **jira-sync** skill to create/reuse the Epic and register it (`T ticket --kind epic`).
+- Otherwise, first make the **workspace** ready. The directory you were started in is the workspace: it holds `ghe/runs` and `ghe/workspace.yaml`, and it need not be a repo (it may be a plain folder or the system root). If it has no `ghe/config.yaml`, run `T bootstrap --workspace` (no prompts, never overwrites). If the work is a Jira ticket and `jira.*` is still a placeholder, run the **ghe-setup** skill for the tracker settings only (validation commands are per repo, see discover §1b).
+- Then `T init` → `RUN`. Parse flags (`--repo` may repeat). Run the **discover** skill (it finds or clones the repos the work needs, runs **ghe-setup** on any repo that lacks it, writes `source.md` and freezes its hash through `T result --node discover`). With `tracker: jira`, use the **jira-sync** skill to create/reuse the Epic and register it (`T ticket --kind epic`).
 - Resolve the roster/graph: `T resolve --run $RUN`. `ok:false` → show `reason`, `T finish --status FAILED`, stop. Print any `warnings` to the user. The result lists `layers` (nodes that may run concurrently).
 
 ## 1. Budget check (before EVERY node and after recording its tokens)
@@ -39,9 +40,9 @@ Take `layers` from `graph.resolved.yaml` in order. A layer's nodes run concurren
 ## 4. Builder node (plan → waves → workers → integrate)
 1. `builder` agent, `PHASE=plan` → `plans/stories.json`. `T result --node builder` after the plan phase is NOT called yet (the node completes in step 5); instead check the file exists, then `T waves --run $RUN`. `ok:false` (missing owns, cycle, unknown deps) → send errors back to the builder once.
 2. With jira: one task per story (jira-sync, `T ticket --kind task --node builder --ref <story-id>`), blocked-by links from `depends`.
-3. For each wave in order: spawn one `story-worker` per story (parallel, `isolation: worktree`, at most `max_parallel` at once). Stories with overlapping `owns` are already serialised by `T waves`.
+3. For each wave in order: spawn one `story-worker` per story (parallel, at most `max_parallel` at once). Each story names its `repo` (a name from `source.md` `repos`). If that repo is the session's own repo, use `isolation: worktree`. Otherwise (other repos, or a non-repo workspace) create the worktree yourself, `git -C <repo path> worktree add -b ghe/<run-id>/<story-id> <repo path>/.claude/worktrees/<story-id>`, and tell the worker `WORKTREE=<that path>` and `REPO=<name>`: it works and commits only inside it. Merge each story branch into that repo's integration branch, never into another repo. Stories with overlapping `owns` are already serialised by `T waves`.
 4. After each worker: read `nodes/builder/stories/<id>.json`. If every DoD criterion is true and a commit exists, run a read-only story review: `Agent` with `subagent_type: reviewer`, `MODE=story`, the story id and the commit (it checks the diff against the DoD, contract conformance, Conventional Commit format and secrets, and returns `APPROVE` or `REQUEST_CHANGES` with findings). `APPROVE` → `T story --id <id> --status done` and merge the worktree branch into the integration branch. `REQUEST_CHANGES` → `T story --id <id> --status revise` (beyond `max_story_revisions` it returns `blocked` ⇒ §9) and re-run that worker with the findings.
-5. All waves done: `builder` agent `PHASE=integrate` (runs `validation.commands`, writes `build-report.md`) → `T result --node builder`.
+5. All waves done: `builder` agent `PHASE=integrate` (runs each touched repo's own `validation.commands` in that repo, writes `build-report.md`) → `T result --node builder`.
 
 ## 5. Deploy
 - `DEPLOY_TARGET=local`: devops agent `PHASE=deploy`.
