@@ -180,6 +180,8 @@ Install:  `/plugin marketplace add ssenapat/graph-harness-engineering` then `/pl
 
 Use (in the project you want to work on):  `/ghe:setup` once, then `/ghe:run <jira-key | path/to/spec.md | free text>`; `/ghe:status` any time.
 
+Works from any folder: name the repos in the prompt or the Jira ticket; GHE finds them in the current or parent folder, clones only after you confirm, and runs `/ghe:setup` on repos that lack it.
+
 Full documentation: %s
 """ % REPO_URL
 

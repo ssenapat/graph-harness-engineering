@@ -67,7 +67,16 @@ Open Claude Code in the project you want to work on, then:
 
 Flags: `--mode new|existing|maintain`, `--roster ba,architect,...`, `--deploy local|cloud`, `--reviewer` (human review gate after the Architect), `--resume <run-id>`.
 
-The project to change is the folder Claude Code is open in (or the one you pass explicitly). A Jira ticket describes the change but not the location. If you run from elsewhere, point GHE at the repo.
+The folder Claude Code is open in is the **workspace**. It can be a repo or any other folder. The repos to change are resolved as described in the next section, so you can name them in the prompt or in the Jira ticket.
+
+## Working across repos (workspace mode)
+
+Install the plugin anywhere and run `/ghe:run` from any folder, even one that is not a repo. That folder is the **workspace**: it holds `ghe/runs` and `ghe/workspace.yaml`. The repos a run works on are resolved like this:
+
+1. Repo names, paths or clone URLs in the prompt win. If the prompt names none, GHE reads them from the Jira ticket. It asks you only when neither does.
+2. Each hint is looked up locally first: the current folder, then its child folders, then the parent folder's children (`ghe_tool.py repos find`).
+3. Ambiguous or fuzzy matches are shown to you. A clone happens only after you confirm the URL and destination (`repos clone --confirmed`). Clones go into the workspace folder, or next to it when the workspace is itself a repo.
+4. Any repo without `ghe/config.yaml` gets `/ghe:setup` run on it (you confirm its test/lint commands) before work starts. Each repo keeps its own validation commands.
 
 ### Tips
 
@@ -83,6 +92,7 @@ your-project/
 ├── ghe/
 │   ├── config.yaml        # tracker, Jira site/project/board, validation commands, budgets, deploy target
 │   ├── graph.yaml         # the default graph and roster rules
+│   ├── workspace.yaml     # repos this workspace works on (written by a run)
 │   ├── memory/
 │   │   ├── decisions.md   # append-only: what was decided and why
 │   │   └── patterns.md    # reusable implementation patterns
@@ -186,12 +196,3 @@ After changing anything under `.claude/` or `ghe/`, run `bin/ghe-build-plugin` a
 ```bash
 python3 -m pytest tests -q
 ```
-
-## Working across repos (workspace mode)
-
-Install the plugin anywhere and run `/ghe:run` from any folder, even one that is not a repo. That folder is the **workspace**: it holds `ghe/runs` and `ghe/workspace.yaml`. The repos a run works on are resolved like this:
-
-1. Repo names, paths or clone URLs in the prompt (`--repo <name|path|url>`, repeatable) win. If the prompt names none, GHE reads them from the Jira ticket. It asks you only when neither does.
-2. Each hint is looked up locally first: the current folder, then its child folders, then the parent folder's children (`ghe_tool.py repos find`).
-3. Ambiguous or fuzzy matches are shown to you. A clone happens only after you confirm the URL and destination (`repos clone --confirmed`). Clones go into the workspace folder, or next to it when the workspace is itself a repo.
-4. Any repo without `ghe/config.yaml` gets `/ghe:setup` run on it (you confirm its test/lint commands) before work starts. Each repo keeps its own validation commands.
