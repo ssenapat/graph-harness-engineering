@@ -9,7 +9,7 @@ source of truth, used as-is by `bin/ghe-init`. This script derives the plugin fo
                             become run / setup / status, so they are invoked as /ghe:run, /ghe:setup, /ghe:status.
   * hooks/                  the hook scripts + hooks.json derived from .claude/settings.json
   * rules/ templates/ schemas/   copied (agents and skills read them from the plugin directory)
-  * ghe/runner/ghe_tool.py  copied byte-for-byte; ghe/defaults/{config,graph}.yaml are the defaults that
+  * ghe/runner/*.py         every runner module copied byte-for-byte (F25); ghe/defaults/{config,graph}.yaml are the defaults that
                             `ghe_tool.py bootstrap` (run by /ghe:setup) copies into the user's project
   * .claude-plugin/plugin.json
 
@@ -39,8 +39,9 @@ IGNORE = shutil.ignore_patterns("__pycache__", "*.pyc", ".DS_Store", ".gitkeep")
 # --------------------------------------------------------------------------- text rewriting
 def rewrite(text: str) -> str:
     # runner: `python3 ghe/runner/ghe_tool.py` -> quoted absolute plugin path (the path may contain spaces)
-    text = text.replace("python3 ghe/runner/ghe_tool.py", f'python3 "{ROOT_VAR}/ghe/runner/ghe_tool.py"')
-    text = re.sub(r"(?<![\w/{}.-])ghe/runner/ghe_tool\.py", f"{ROOT_VAR}/ghe/runner/ghe_tool.py", text)
+    for mod in ("ghe_tool", "ghe_graph"):
+        text = text.replace(f"python3 ghe/runner/{mod}.py", f'python3 "{ROOT_VAR}/ghe/runner/{mod}.py"')
+        text = re.sub(rf"(?<![\w/{{}}.-])ghe/runner/{mod}\.py", f"{ROOT_VAR}/ghe/runner/{mod}.py", text)
     # toolkit-owned read-only files now live in the plugin directory
     text = re.sub(r"\.claude/(rules|skills|agents|hooks)/", lambda m: f"{ROOT_VAR}/{m.group(1)}/", text)
     for old_name, new_name in SKILL_RENAMES.items():
@@ -53,8 +54,8 @@ def rewrite(text: str) -> str:
 
 LEFTOVERS = [
     (re.compile(r"\.claude/(skills|agents|rules|hooks)/"), "reference to a .claude/ toolkit path"),
-    (re.compile(r"python3 ghe/runner/ghe_tool\.py"), "unrewritten runner invocation"),
-    (re.compile(r"(?<![\w/{}.-])ghe/runner/ghe_tool\.py"), "unrewritten runner path"),
+    (re.compile(r"python3 ghe/runner/ghe_(tool|graph)\.py"), "unrewritten runner invocation"),
+    (re.compile(r"(?<![\w/{}.-])ghe/runner/ghe_(tool|graph)\.py"), "unrewritten runner path"),
     (re.compile(r"(?<![\w/.{}-])(templates|schemas)/"), "unrewritten templates/ or schemas/ path"),
     (re.compile(r"(?<![\w/.-])/ghe-(run|setup|status)\b"), "unrewritten slash-command name"),
 ]
@@ -149,7 +150,11 @@ def build_static(out):
                         t = fh.read()
                     with open(p, "w", encoding="utf-8", newline="\n") as fh:
                         fh.write(rewrite(t))
-    copy_file(out, os.path.join("ghe", "runner", "ghe_tool.py"), os.path.join("ghe", "runner", "ghe_tool.py"))
+    # F25: package EVERY runner module (not just ghe_tool.py) so a split runtime still works as a plugin
+    runner_dir = os.path.join(REPO, "ghe", "runner")
+    for f in sorted(os.listdir(runner_dir)):
+        if f.endswith(".py"):
+            copy_file(out, os.path.join("ghe", "runner", f), os.path.join("ghe", "runner", f))
     for f in ("config.yaml", "graph.yaml"):
         copy_file(out, os.path.join("ghe", f), os.path.join("ghe", "defaults", f))
     copy_file(out, "LICENSE", "LICENSE")

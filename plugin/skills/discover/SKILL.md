@@ -31,6 +31,13 @@ Work may span one or more repos. The workspace (where GHE was started) is not ne
 3. **Setup check**: `T repos list` returns `needs_setup`. For each repo listed, run the **ghe-setup** skill with that repo as the target (`--root <repo path>`: bootstrap, detect stack, confirm commands with the user) BEFORE any other node runs. Repos that already have `ghe/config.yaml` are left alone.
 4. Record the result in `source.md` frontmatter as `repos` (see below). Brownfield `repo-survey.md` covers every repo in `repos`, one section each.
 
+## 1c. Optional Graphify context (never required)
+`G` = `python3 "${CLAUDE_PLUGIN_ROOT}/ghe/runner/ghe_graph.py"`. For each repo in `repos` (and the workspace itself for a single-repo run):
+1. `G preflight --root <repo>`. Obey its `action`: `skip` (disabled or empty project: do nothing, build no index), `reuse` (fresh graph), `build`/`refresh` (the runner already ran it, bounded, at most once), `fallback` (Graphify absent, failed, timed out or stale: continue without it). Never retry a timed-out index, never loop, never block the run on Graphify.
+2. `G retrieve --root <repo> --query "<the work description, short>"` gives a bounded packet. Use it as context only. Every item carries `provenance`: `extracted` items are source facts; `inferred` items are hints, non-authoritative, never evidence for an acceptance decision and never a sole reason for a design choice. Re-check an inferred relationship against the real source before relying on it.
+3. Never turn on semantic extraction, cloud/model use or any upload yourself. Those need `graphify.semantic_extraction`, `semantic_approved` and a `semantic_provider` set by the human in `ghe/config.yaml`.
+4. Note in `source.md` `## Linked context` which retrieval path was used (`graph` or `direct`) and any `fallback` reason.
+
 ## 2. Write `RUN_DIR/artifacts/source.md`
 ```markdown
 ---
@@ -61,3 +68,6 @@ Rules:
 
 ## 3. Finish
 Then, in the orchestrator: write `nodes/discover/node-result.json` (criteria: `source_written`, `frontmatter_valid`, `source_quoted_verbatim`), run `ghe_tool.py result --node discover` (it freezes the `source_hash` used as the compaction anchor). If `open_questions` is non-empty, ask them with `AskUserQuestion`, update the frontmatter (before freezing), then continue.
+
+## Bounded context (T41, T42)
+For large comment/history/memory/graph sources build a packet instead of reading them whole: `context-packet --run $RUN --query <text> --source name=<artifact path> ...` (limits in `ghe/config.yaml` `context:`). Entries marked `[essential]` always count; if they exceed the bounds the command refuses with `action: split_or_pause` - split the work or pause, never truncate.

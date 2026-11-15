@@ -117,3 +117,129 @@ def test_plugin_path_runner_call_is_a_plain_runner_call(tmp_path, cmd):
 def test_plugin_path_does_not_exempt_chained_writes(tmp_path, cmd):
     (tmp_path / "ghe" / "runs" / "r1").mkdir(parents=True)
     assert bash(tmp_path, cmd) == 2
+
+
+# ---- F15: approval identity (never guess the run by mtime)
+def _mk_run(root, rid, approved):
+    d = root / "ghe" / "runs" / rid; d.mkdir(parents=True, exist_ok=True)
+    g = {"cloud-apply": {"status": "approved" if approved else "waiting"}}
+    (d / "state.json").write_text(json.dumps({"run_id": rid, "status": "RUNNING", "gates": g}))
+
+
+def _bash_env(root, cmd, **env):
+    cfg = root / "ghe" / "config.yaml"; cfg.parent.mkdir(parents=True, exist_ok=True); cfg.touch()
+    e = {**os.environ, "CLAUDE_PROJECT_DIR": str(root), **env}
+    e.pop("GHE_RUN_ID", None) if "GHE_RUN_ID" not in env else None
+    return subprocess.run([sys.executable, os.path.join(HOOKS, "ghe_guard.py")],
+                          input=json.dumps({"tool_name": "Bash", "tool_input": {"command": cmd}}),
+                          capture_output=True, text=True, env=e, cwd=root).returncode
+
+
+def test_f15_two_active_runs_without_id_fails_closed(tmp_path):
+    _mk_run(tmp_path, "a", True); _mk_run(tmp_path, "b", False)
+    assert _bash_env(tmp_path, "terraform apply") == 2
+
+
+def test_f15_named_run_uses_its_own_approval(tmp_path):
+    _mk_run(tmp_path, "a", True); _mk_run(tmp_path, "b", False)
+    assert _bash_env(tmp_path, "terraform apply", GHE_RUN_ID="a") == 0
+    assert _bash_env(tmp_path, "terraform apply", GHE_RUN_ID="b") == 2
+
+
+def test_f15_unknown_run_id_is_denied(tmp_path):
+    _mk_run(tmp_path, "a", True)
+    assert _bash_env(tmp_path, "terraform apply", GHE_RUN_ID="nope") == 2
+
+
+# ---- F24 / T27: fail closed on bad protected-action input
+def test_f24_unparsable_payload_in_ghe_project_is_denied(tmp_path):
+    cfg = tmp_path / "ghe" / "config.yaml"; cfg.parent.mkdir(parents=True); cfg.touch()
+    r = subprocess.run([sys.executable, os.path.join(HOOKS, "ghe_guard.py")], input="{not json",
+                       capture_output=True, text=True, env={**os.environ, "CLAUDE_PROJECT_DIR": str(tmp_path)}, cwd=tmp_path)
+    assert r.returncode == 2
+
+
+def test_t28_non_ghe_project_stays_silent(tmp_path):
+    r = subprocess.run([sys.executable, os.path.join(HOOKS, "ghe_guard.py")], input="{not json",
+                       capture_output=True, text=True, env={**os.environ, "CLAUDE_PROJECT_DIR": str(tmp_path)}, cwd=tmp_path)
+    assert r.returncode == 0
+
+
+def test_t27_corrupt_state_blocks_source_edit(tmp_path):
+    d = tmp_path / "ghe" / "runs" / "r1" / "artifacts"; d.mkdir(parents=True)
+    (tmp_path / "ghe" / "runs" / "r1" / "state.json").write_text("{corrupt")
+    r = run("ghe_guard.py", {"tool_name": "Write", "tool_input": {"file_path": str(d / "source.md")}}, tmp_path)
+    assert r.returncode == 2
+
+
+def test_t27_corrupt_state_does_not_authorize_apply(tmp_path):
+    d = tmp_path / "ghe" / "runs" / "r1"; d.mkdir(parents=True)
+    (d / "state.json").write_text("{corrupt")
+    assert bash(tmp_path, "terraform apply") == 2
+
+
+# ---- F19: authored design files change only through an approved design revision
+def _design_run(tmp_path, revs=None):
+    d = tmp_path / "ghe" / "runs" / "r1"; (d / "artifacts").mkdir(parents=True)
+    (d / "state.json").write_text(json.dumps({"status": "RUNNING", "design_revisions": revs or {}}))
+    (d / "artifacts" / "hld.md").write_text("# hld")
+    return d
+
+
+def _write(tmp_path, rel, tool="Edit"):
+    return run("ghe_guard.py", {"tool_name": tool, "tool_input": {"file_path": str(tmp_path / rel)}}, tmp_path).returncode
+
+
+@pytest.mark.parametrize("tool", ["Write", "Edit", "MultiEdit"])
+def test_f19_blocks_edit_of_existing_design_without_revision(tmp_path, tool):
+    _design_run(tmp_path)
+    assert _write(tmp_path, "ghe/runs/r1/artifacts/hld.md", tool) == 2
+
+
+def test_f19_proposed_but_unapproved_revision_does_not_unlock(tmp_path):
+    _design_run(tmp_path, {"DR-1": {"status": "proposed", "files": ["hld.md"]}})
+    assert _write(tmp_path, "ghe/runs/r1/artifacts/hld.md") == 2
+
+
+def test_f19_approved_revision_unlocks_only_the_named_file(tmp_path):
+    d = _design_run(tmp_path, {"DR-1": {"status": "approved", "files": ["hld.md"]}})
+    (d / "artifacts" / "CONTRACT.md").write_text("c")
+    assert _write(tmp_path, "ghe/runs/r1/artifacts/hld.md") == 0
+    assert _write(tmp_path, "ghe/runs/r1/artifacts/CONTRACT.md") == 2
+
+
+def test_f19_first_authoring_of_a_design_file_is_allowed(tmp_path):
+    _design_run(tmp_path)
+    assert _write(tmp_path, "ghe/runs/r1/artifacts/lld.md", "Write") == 0
+
+
+def test_f19_corrupt_state_fails_closed(tmp_path):
+    d = _design_run(tmp_path); (d / "state.json").write_text("{nope")
+    assert _write(tmp_path, "ghe/runs/r1/artifacts/hld.md") == 2
+
+
+# ---- F09: tool-dispatch enforcement of the run token ceiling
+def _dispatch(root, tokens_total, ceiling=1000, status="RUNNING"):
+    cfg = os.path.join(str(root), "ghe", "config.yaml")
+    os.makedirs(os.path.dirname(cfg), exist_ok=True)
+    open(cfg, "w").write(f"budgets:\n  max_tokens_per_run: {ceiling}\n")
+    rd = os.path.join(str(root), "ghe", "runs", "r1")
+    os.makedirs(rd, exist_ok=True)
+    json.dump({"run_id": "r1", "status": status, "tokens_total": tokens_total, "gates": {}},
+              open(os.path.join(rd, "state.json"), "w"))
+    return run("ghe_guard.py", {"tool_name": "Agent", "tool_input": {"subagent_type": "builder"}}, root)
+
+
+@pytest.mark.parametrize("tool", ["Agent", "Task"])
+def test_dispatch_denied_when_run_budget_exhausted(tmp_path, tool):
+    _dispatch(tmp_path, 1000)
+    r = run("ghe_guard.py", {"tool_name": tool, "tool_input": {}}, tmp_path)
+    assert r.returncode == 2 and "budget exhausted" in r.stderr
+
+
+def test_dispatch_allowed_with_budget_left(tmp_path):
+    assert _dispatch(tmp_path, 999).returncode == 0
+
+
+def test_dispatch_allowed_when_no_active_run(tmp_path):
+    assert _dispatch(tmp_path, 5000, status="DONE").returncode == 0

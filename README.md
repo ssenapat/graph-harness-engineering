@@ -4,6 +4,8 @@ A Claude Code toolkit that turns a requirement (a Jira ticket, a file, or a prom
 
 The graph is data (`ghe/graph.yaml`). A small Python runner (`ghe/runner/ghe_tool.py`) decides what runs next, enforces budgets, detects no-progress and checks drift. The LLM never decides control flow.
 
+**Runner guarantees** (hardening F01-F04): state writes are atomic; every per-run command holds `RUN_DIR/.lock` (cross-platform, stale locks are broken after a dead owner or 60s); `init` never overwrites a run (`--resume <id>` to continue one); `start` refuses unmet dependencies, running/done nodes, waiting or terminal runs and exhausted budgets; `skip` needs `--reason` and an `optional` node; `finish --status DONE` is refused unless the run really is complete; `result` needs a started node, is idempotent, and only accepts artifacts inside `artifacts/`. The lock is tested on macOS; on Windows it is implemented but not verified.
+
 ## Prerequisites
 
 - Claude Code, Python 3.9+, and `pip install pyyaml`.
@@ -63,7 +65,7 @@ Open Claude Code in the project you want to work on, then:
 |---|---|---|
 | `new` | Empty folder / greenfield | Full graph: `discover` → `ba` → `architect` → `qa` → `builder` → `deploy` → `test` → `final-report` |
 | `existing` | Adding a feature to a repo | `discover` surveys the repo; the Architect writes an impact analysis instead of a full HLD |
-| `maintain` | Bug fix / small change | Lighter: QA and DevOps are dropped, Builder works from a small design |
+| `maintain` | Bug fix / small change | Lighter: `devops-prep` is dropped, the BA uses a light variant and the Architect runs only for design-impacting changes. QA/Tester stay in the roster unless you drop them; without a Tester, `finish --status DONE` requires `verify` (the runner executes `validation.commands`) to pass or an explicit `verify --waive --reason ... --by ...` |
 
 Flags: `--mode new|existing|maintain`, `--roster ba,architect,...`, `--deploy local|cloud`, `--reviewer` (human review gate after the Architect), `--resume <run-id>`.
 

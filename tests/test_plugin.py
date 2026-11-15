@@ -155,3 +155,30 @@ def test_bootstrap_in_the_toolkit_repo_itself_keeps_its_files(tmp_path):
     assert r.returncode == 0
     assert (proj / "ghe" / "config.yaml").read_text() == "tracker: local\n"
     assert (proj / "ghe" / "graph.yaml").is_file()
+
+
+def test_f25_every_runner_module_is_packaged_in_both_install_forms():
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    mods = sorted(f for f in os.listdir(os.path.join(root, "ghe", "runner")) if f.endswith(".py"))
+    assert "ghe_tool.py" in mods
+    for m in mods:
+        assert os.path.isfile(os.path.join(root, "plugin", "ghe", "runner", m)), f"plugin is missing runner module {m}"
+    assert "copy_dir ghe/runner ghe/runner" in open(os.path.join(root, "bin", "ghe-init")).read()
+
+
+def test_t57_copy_in_rerun_preserves_user_graph_memory_and_config(tmp_path):
+    runner(tmp_path, "bootstrap")
+    edits = {"ghe/graph.yaml": "\n# my graph edit\n", "ghe/memory/decisions.md": "\n## D1 keep\n",
+             "ghe/memory/patterns.md": "\n## P1 keep\n", "ghe/config.yaml": "\n# my cfg\n"}
+    for rel, extra in edits.items():
+        f = tmp_path / rel
+        f.write_text(f.read_text() + extra)
+    run_dir = tmp_path / "ghe" / "runs" / "ghe-keep"
+    run_dir.mkdir(parents=True)
+    (run_dir / "state.json").write_text('{"keep": true}')
+    before = {rel: (tmp_path / rel).read_bytes() for rel in edits}
+    rc, out, _ = runner(tmp_path, "bootstrap")
+    assert rc == 0 and out["created"] == []
+    for rel, b in before.items():
+        assert (tmp_path / rel).read_bytes() == b, rel
+    assert (run_dir / "state.json").read_text() == '{"keep": true}'

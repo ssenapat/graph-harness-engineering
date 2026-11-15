@@ -6,19 +6,19 @@ argument-hint: <jira key|url | file | "prompt"> [--mode new|existing|maintain] [
 ---
 # ghe-run — the orchestrator (spec §5, §9, §10)
 
-You are the ORCHESTRATOR. You do not design, code or test. You walk the graph. `T` = `python3 "${CLAUDE_PLUGIN_ROOT}/ghe/runner/ghe_tool.py"`. Every `T` command prints JSON: read it, obey it. Never decide "what next" from memory; always from `T` output and `RUN/graph.resolved.yaml`.
+You are the ORCHESTRATOR. You do not design, code or test. You walk the graph. `T` = `python3 "${CLAUDE_PLUGIN_ROOT}/ghe/runner/ghe_tool.py"`. Every `T` command prints JSON: read it, obey it. The runner enforces the contract: `start` refuses a node whose dependencies are not done, a node that is running/done, a run that is waiting for a human or terminal, and an exhausted budget; `result` needs a started node, is idempotent for an identical result, rejects a different second result and artifact paths outside `artifacts/`. A refusal (`ok:false`, non-zero exit) is final: do not work around it, report it. Never decide "what next" from memory; always from `T` output and `RUN/graph.resolved.yaml`.
 
 ## 0. Start or resume
 - `--resume <run-id>`: `RUN=ghe/runs/<run-id>`; `T status --run $RUN`. If status is `WAITING_HUMAN`, find what is pending (a gate, a node `waiting_human`/`blocked`, open questions), obtain the human's answer (see §6/§7), record it, set the node back to runnable with `T start`, then continue at §3.
 - Otherwise, first make the **workspace** ready. The directory you were started in is the workspace: it holds `ghe/runs` and `ghe/workspace.yaml`, and it need not be a repo (it may be a plain folder or the system root). If it has no `ghe/config.yaml`, run `T bootstrap --workspace` (no prompts, never overwrites). If the work is a Jira ticket and `jira.*` is still a placeholder, run the **ghe-setup** skill for the tracker settings only (validation commands are per repo, see discover §1b).
-- Then `T init` → `RUN`. Parse flags (`--repo` may repeat). Run the **discover** skill (it finds or clones the repos the work needs, runs **ghe-setup** on any repo that lacks it, writes `source.md` and freezes its hash through `T result --node discover`). With `tracker: jira`, use the **jira-sync** skill to create/reuse the Epic and register it (`T ticket --kind epic`).
-- Resolve the roster/graph: `T resolve --run $RUN`. `ok:false` → show `reason`, `T finish --status FAILED`, stop. Print any `warnings` to the user. The result lists `layers` (nodes that may run concurrently).
+- Then `T init` → `RUN` (never reuses a run id; to continue an existing run use `T init --resume <run-id>`, which only validates it). Parse flags (`--repo` may repeat). Run the **discover** skill (it finds or clones the repos the work needs, runs **ghe-setup** on any repo that lacks it, writes `source.md` and freezes its hash through `T result --node discover`). With `tracker: jira`, use the **jira-sync** skill to create/reuse the Epic and register it (`T ticket --kind epic`).
+- Resolve the roster/graph: `T resolve --run $RUN`. `ok:false` → show `reason`, `T finish --status FAILED --reason "<why>"`, stop. Print any `warnings` to the user. The result lists `layers` (nodes that may run concurrently).
 
 ## 1. Budget check (before EVERY node and after recording its tokens)
 `T budget --run $RUN --node <n>` → `actions`:
-- `stop` / `stop_node`: stop, write the escalation report (§9), `T finish --status WAITING_HUMAN` (or FAILED if the human cannot continue), tell the user the cap and how to raise it in `ghe/config.yaml`.
+- `stop` / `stop_node`: stop, write the escalation report (§9), `T finish --status WAITING_HUMAN` (or `FAILED --reason "<why>"` if the human cannot continue), tell the user the cap and how to raise it in `ghe/config.yaml`.
 - `compact_run` / `compact_node`: run the **compact** skill (anchor + summary + drift check), then continue. Optional work (devops-prep) is skipped when `compact_run`.
-After each agent returns, record its tokens: `T tokens --run $RUN --node <n> --add <total tokens used>` (use the agent's reported usage; if unknown, estimate conservatively from output size and say so).
+Usage has ONE authoritative ingestion path: a node that ends in `T result` reports its tokens there (`--tokens <n>`, counted once per attempt) - do NOT also call `T tokens` for it. Use `T tokens --run $RUN --node <n> --add <n> --event <unique-id>` only for usage that never reaches a `result` (e.g. a triage agent); the `--event` id makes a replay count once and a negative or malformed value is refused. If usage is unknown, estimate conservatively from output size and say so. Caps in `max_tokens_per_node` match the node name first, then the node's agent role (`tester` caps node `test`).
 
 ## 2. Executing one node (`NODE`)
 1. `T start --run $RUN --node NODE` (`ok:false` ⇒ attempts exhausted ⇒ §9 escalate).
@@ -35,7 +35,7 @@ Take `layers` from `graph.resolved.yaml` in order. A layer's nodes run concurren
 - `discover`: already done in §0.
 - `review-gate`: the **review-gate** skill (§7).
 - `builder`: §4. `deploy`: §5. `test`: §8 loop. `final-report`: §10.
-- `devops-prep` (optional): run in the same layer as qa/builder; skipped under `compact_run` (`T skip`).
+- `devops-prep` (optional): run in the same layer as qa/builder; skipped under `compact_run` (`T skip --node devops-prep --reason "compact_run"`; only nodes marked `optional` in the graph can be skipped, and a reason is required).
 
 ## 4. Builder node (plan → waves → workers → integrate)
 1. `builder` agent, `PHASE=plan` → `plans/stories.json`. `T result --node builder` after the plan phase is NOT called yet (the node completes in step 5); instead check the file exists, then `T waves --run $RUN`. `ok:false` (missing owns, cycle, unknown deps) → send errors back to the builder once.
@@ -46,14 +46,14 @@ Take `layers` from `graph.resolved.yaml` in order. A layer's nodes run concurren
 
 ## 5. Deploy
 - `DEPLOY_TARGET=local`: devops agent `PHASE=deploy`.
-- `cloud`: devops agent `PHASE=deploy` does the credential preflight. Missing/expired/ambiguous AWS region/account/credentials → it returns `needs_human`; ask the requester (`AskUserQuestion` in the CLI, or Jira comment) to PROVIDE them, store nothing but region/account in `source.md` frontmatter (never credentials), re-run. Never guess or default.
-- The agent returns a plan and `needs_human` for `cloud-apply`: `T gate --run $RUN --name cloud-apply --request "<plan summary>"`; ask the human (§7). Only after `gate-decide --decision approve` re-run the agent with `GATE cloud-apply APPROVED`. The `ghe_guard.py` hook blocks `terraform apply` otherwise. Destroy needs gate `destructive`.
+- `cloud`: devops agent `PHASE=deploy` does the credential preflight. Missing/expired/ambiguous AWS region/account/credentials → it returns `needs_human`; ask the requester (`AskUserQuestion` in the CLI, or Jira comment) to PROVIDE them, record only region/account (never credentials) in `$RUN_DIR/artifacts/deploy-target.md` (a separate run artifact; `source.md` stays frozen and is never edited), then re-run. Never guess or default.
+- The agent returns a plan and `needs_human` for `cloud-apply`: `T gate --run $RUN --name cloud-apply --request "<plan summary>"`; ask the human (§7). Only after `gate-decide --decision approve` re-run the agent with `GATE cloud-apply APPROVED`. Before `terraform apply` / any destructive call, run `T authorize --action cloud-apply|destructive`; it is the authoritative check and must exit 0. The `ghe_guard.py` hook is only a second, regex-based safety net (not a security boundary). Destroy needs gate `destructive`.
 
 ## 6. Open questions and `needs_human`
-Present each `open_questions` entry with `AskUserQuestion` (CLI) or comment on the ticket (jira). `source.md` is frozen, so human answers are never written into it: re-run the node (`T start`) with the Q&A pasted into its prompt under `HUMAN CLARIFICATIONS`. FIRST record the answer with `T resolve-wait --run $RUN --node NODE --answer "<text>" --outcome rerun|done` (`rerun` if the node must run again - the waiting attempt is refunded; `done` if its work stands and the answer only unblocked it). Never leave a node in `waiting_human` after the human has answered, and the agent records them in its own artifact (BA: a "Clarifications (human)" section of `requirement-spec.md`). Exception: the discover node, before it freezes, may update `source.md`. If no answer is available now: `T finish --status WAITING_HUMAN` and tell the user to run `/ghe:run --resume <run-id>`.
+Present each `open_questions` entry with `AskUserQuestion` (CLI) or comment on the ticket (jira). `source.md` is frozen, so human answers are never written into it: re-run the node (`T start`) with the Q&A pasted into its prompt under `HUMAN CLARIFICATIONS`. FIRST record the answer with `T resolve-wait --run $RUN --node NODE --answer "<text>" --outcome rerun|done --by "<who answered>"` (`rerun` if the node must run again - the waiting attempt is refunded; `done` if its work stands and the answer only unblocked it). Never leave a node in `waiting_human` after the human has answered, and the agent records them in its own artifact (BA: a "Clarifications (human)" section of `requirement-spec.md`). Exception: the discover node, before it freezes, may update `source.md`. If no answer is available now: `T finish --status WAITING_HUMAN` and tell the user to run `/ghe:run --resume <run-id>`.
 
 ## 7. Human gates
-`T gate --name <g> --request "<text>"` (state → WAITING_HUMAN) → ask the human → `T gate-decide --name <g> --decision approve|request_changes|reject --comment "<text>"`:
+`T gate --name <g> --request "<text>"` (state → WAITING_HUMAN) → ask the human → `T gate-decide --name <g> --decision approve|request_changes|reject --comment "<text>" --by "<approver>"`:
 - `approve`: continue. `request_changes`: re-run the producing node with the comment (`gate_status: escalated` after `max_gate_revisions` ⇒ §9). `reject`: run CANCELLED, stop.
 The decision is always recorded in state AND (jira) as a comment.
 
@@ -61,6 +61,7 @@ The decision is always recorded in state AND (jira) as a comment.
 For `round` = 1..`max_rounds`:
 1. `tester` agent (`ROUND=<round>`) → `T result --node test`.
 2. `T defects --run $RUN --round <round>` → `verdict`:
+   - `incomplete` (rc 1): the defect file is missing, malformed, for another round, or reports blocked/missing cases. This is NEVER a pass - re-run the Tester for the round, or escalate if it cannot produce complete evidence.
    - `pass`: leave the loop.
    - `no_progress` or `max_rounds`: `escalate:true` → §9 (never run another round).
    - `first`/`progress`: continue below.
@@ -72,9 +73,10 @@ For `round` = 1..`max_rounds`:
 Write `$RUN/artifacts/escalation-report.md`: the request (quoted), what was done (node statuses), what failed and the evidence (problems, defect fingerprints, budget numbers), and the exact decisions the human must make. `T finish --status WAITING_HUMAN` (human-resolvable) or `FAILED`. With jira: comment it on the epic.
 
 ## 10. Finish
+If the roster has no Tester (e.g. `maintain`), run `T verify` first (the runner executes `validation.commands`; empty = blocked) or record a waiver with `T verify --waive --reason "..." --by "<who>"` (F23). `finish --status DONE` refuses otherwise.
 1. `T trace --run $RUN` → `traceability.md`. `ok:false` (gaps) → add them to the report; DONE is not allowed with gaps for executed nodes.
 2. Write `$RUN/artifacts/RUN-REPORT.md` from `${CLAUDE_PLUGIN_ROOT}/templates/run-report.md`: request, roster/warnings, node table (status, attempts, tokens), traceability link, test rounds, compactions (from `state.json`), cost, open risks.
-3. `T finish --status DONE` only if: all executed nodes done, no trace gaps, last test round passes (or no Tester). Otherwise `FAILED` or `WAITING_HUMAN` with the reason.
+3. `T finish --status DONE` only if: all executed nodes done, no trace gaps, last test round passes (or no Tester). The runner re-checks all of this and refuses DONE with a `problems` list; fix what it lists (never retry blindly). Otherwise `FAILED`/`CANCELLED` (`--reason` required) or `WAITING_HUMAN` (needs a pending gate or open question).
 4. Tell the user: run id, epic key/URL (jira), where artifacts are, deploy URL (if any), any warnings. Memory: append decisions via the **memory** skill.
 
 ## Invariants (never break)

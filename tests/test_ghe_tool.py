@@ -39,6 +39,15 @@ def new_run(proj, roster="[ba, architect, qa, builder, devops, tester]", extra="
     return run
 
 
+def mark_done(run, *nodes):
+    """Mark upstream nodes done so a node under test can legitimately start (F02 dependency gate)."""
+    sp = os.path.join(run, "state.json")
+    st = json.load(open(sp))
+    for n in nodes:
+        st["nodes"][n]["status"] = "done"
+    json.dump(st, open(sp, "w"))
+
+
 def write(run, rel, text):
     p = os.path.join(run, rel)
     os.makedirs(os.path.dirname(p), exist_ok=True)
@@ -86,6 +95,7 @@ def test_omitted_agents_warn_and_rewire(proj):
 def test_result_validation_and_retry_cap(proj):
     run = new_run(proj)
     t(proj, "resolve", "--run", run)
+    mark_done(run, "discover")
     t(proj, "start", "--run", run, "--node", "ba")
     write(run, "nodes/ba/node-result.json", json.dumps({"node": "ba", "status": "done", "artifacts": ["x.md"],
           "exit_criteria": {"a": False}, "summary": "s"}))
@@ -99,6 +109,7 @@ def test_result_validation_and_retry_cap(proj):
 def test_fixed_retry_accepted(proj):
     run = new_run(proj)
     t(proj, "resolve", "--run", run)
+    mark_done(run, "discover")
     write(run, "artifacts/requirement-spec.md", "REQ-001")
     res = {"node": "ba", "status": "done", "artifacts": ["requirement-spec.md"], "exit_criteria": {"a": True}, "summary": "s"}
     write(run, "nodes/ba/node-result.json", json.dumps({**res, "exit_criteria": {"a": False}}))
@@ -112,10 +123,12 @@ def test_fixed_retry_accepted(proj):
 def test_identical_retry_is_not_a_retry(proj):
     run = new_run(proj)
     t(proj, "resolve", "--run", run)
-    res = {"node": "ba", "status": "needs_human", "artifacts": [], "exit_criteria": {}, "open_questions": ["Which DB?"], "summary": "s"}
+    mark_done(run, "discover")
+    res = {"node": "ba", "status": "failed", "artifacts": [], "exit_criteria": {}, "summary": "s"}
     write(run, "nodes/ba/node-result.json", json.dumps(res))
     t(proj, "start", "--run", run, "--node", "ba")
-    assert t(proj, "result", "--run", run, "--node", "ba")[1] == 0
+    d, rc = t(proj, "result", "--run", run, "--node", "ba")
+    assert rc == 0 and d["retry_allowed"]
     t(proj, "start", "--run", run, "--node", "ba")
     d, rc = t(proj, "result", "--run", run, "--node", "ba")
     assert rc == 1 and any("identical" in p for p in d["problems"]) and not d["retry_allowed"]
@@ -197,11 +210,11 @@ def test_budget_actions(proj):
     run = new_run(proj)
     t(proj, "resolve", "--run", run)
     assert t(proj, "budget", "--run", run, "--node", "architect")[0]["action"] == "ok"
-    t(proj, "tokens", "--run", run, "--node", "architect", "--add", "90000")
+    t(proj, "tokens", "--run", run, "--node", "architect", "--add", "90000", "--event", "e0")
     assert t(proj, "budget", "--run", run, "--node", "architect")[0]["actions"] == ["compact_node"]
-    t(proj, "tokens", "--run", run, "--node", "builder", "--add", "760000")
+    t(proj, "tokens", "--run", run, "--node", "builder", "--add", "760000", "--event", "e1")
     assert t(proj, "budget", "--run", run, "--node", "builder")[0]["actions"] == ["compact_run", "stop_node"]
-    t(proj, "tokens", "--run", run, "--node", "tester", "--add", "200000")
+    t(proj, "tokens", "--run", run, "--node", "tester", "--add", "200000", "--event", "e2")
     assert t(proj, "budget", "--run", run)[0]["action"] == "stop"
 
 
@@ -218,10 +231,10 @@ def test_gate_revisions_escalate(proj):
     run = new_run(proj)
     t(proj, "resolve", "--run", run)
     t(proj, "gate", "--run", run, "--name", "review-gate", "--request", "x")
-    stat = [t(proj, "gate-decide", "--run", run, "--name", "review-gate", "--decision", "request_changes")[0]["gate_status"] for _ in range(3)]
-    assert stat == ["changes_requested", "changes_requested", "escalated"]
+    stat = [t(proj, "gate-decide", "--run", run, "--name", "review-gate", "--decision", "request_changes", "--by", "tester")[0]["gate_status"] for _ in range(2)]
+    assert stat == ["changes_requested", "escalated"]   # F11: one design batch change, then escalate
     t(proj, "gate", "--run", run, "--name", "cloud-apply", "--request", "x")
-    assert t(proj, "gate-decide", "--run", run, "--name", "cloud-apply", "--decision", "approve")[0]["gate_status"] == "approved"
+    assert t(proj, "gate-decide", "--run", run, "--name", "cloud-apply", "--decision", "approve", "--by", "tester")[0]["gate_status"] == "approved"
 
 
 def test_ticket_registry_and_project_guard(proj):
@@ -238,20 +251,21 @@ def test_ticket_registry_and_project_guard(proj):
 def test_story_revision_cap(proj):
     run = new_run(proj)
     t(proj, "resolve", "--run", run)
-    r = [t(proj, "story", "--run", run, "--id", "S-01", "--status", "revise") for _ in range(3)]
-    assert [x[1] for x in r] == [0, 0, 1] and r[2][0]["status"] == "blocked"
+    r = [t(proj, "story", "--run", run, "--id", "S-01", "--status", "revise") for _ in range(2)]
+    assert [x[1] for x in r] == [0, 1] and r[1][0]["status"] == "blocked"
 
 
 def test_resolve_wait_clears_waiting_without_burning_retry(proj):
     run = new_run(proj)
     t(proj, "resolve", "--run", run)
+    mark_done(run, "discover")
     t(proj, "start", "--run", run, "--node", "ba")
     sp = os.path.join(run, "state.json")
     st = json.load(open(sp))
     st["nodes"]["ba"].update(status="waiting_human", open_questions=["q?"])
     st["status"] = "WAITING_HUMAN"
     json.dump(st, open(sp, "w"))
-    d, rc = t(proj, "resolve-wait", "--run", run, "--node", "ba", "--answer", "a", "--outcome", "rerun")
+    d, rc = t(proj, "resolve-wait", "--run", run, "--node", "ba", "--answer", "a", "--outcome", "rerun", "--by", "tester")
     assert rc == 0 and d["node_status"] == "pending" and d["attempts"] == 0 and d["run_status"] == "RUNNING"
     d, rc = t(proj, "start", "--run", run, "--node", "ba")
     assert rc == 0 and d["attempt"] == 1
@@ -272,3 +286,54 @@ def test_placeholder_jira_config_is_refused(tmp_path):
 def test_shipped_config_has_no_personal_values():
     cfg = open(os.path.join(REPO, "ghe", "config.yaml")).read()
     assert "senapathi" not in cfg and "tracker: local" in cfg and "<JIRA_PROJECT_KEY>" in cfg
+
+
+# ---- F16: validated human decisions (approver identity, no blind done)
+def _wait_ba(proj, with_result):
+    run = new_run(proj)
+    t(proj, "resolve", "--run", run)
+    mark_done(run, "discover")
+    t(proj, "start", "--run", run, "--node", "ba")
+    sp = os.path.join(run, "state.json")
+    st = json.load(open(sp))
+    st["nodes"]["ba"].update(status="waiting_human", open_questions=["q?"])
+    if with_result:
+        st["nodes"]["ba"]["result"] = {"digest": "abc"}
+    st["status"] = "WAITING_HUMAN"
+    json.dump(st, open(sp, "w"))
+    return run, sp
+
+
+def test_f16_resolve_wait_requires_approver_and_answer(proj):
+    run, sp = _wait_ba(proj, True)
+    before = open(sp).read()
+    for extra in (["--answer", "a"], ["--by", "me"], ["--answer", "  ", "--by", "me"]):
+        d, rc = t(proj, "resolve-wait", "--run", run, "--node", "ba", "--outcome", "done", *extra)
+        assert rc != 0 and not d["ok"]
+    assert open(sp).read() == before
+
+
+def test_f16_done_without_recorded_result_is_refused(proj):
+    run, sp = _wait_ba(proj, False)
+    d, rc = t(proj, "resolve-wait", "--run", run, "--node", "ba", "--answer", "a", "--by", "me", "--outcome", "done")
+    assert rc != 0 and "rerun" in d["error"]
+    assert json.load(open(sp))["nodes"]["ba"]["status"] == "waiting_human"
+
+
+def test_f16_approver_recorded_and_rerun_refunds(proj):
+    run, sp = _wait_ba(proj, True)
+    d, rc = t(proj, "resolve-wait", "--run", run, "--node", "ba", "--answer", "a", "--by", "alice", "--outcome", "done")
+    assert rc == 0
+    assert json.load(open(sp))["nodes"]["ba"]["human_answers"][0]["by"] == "alice"
+
+
+def test_f16_gate_decide_requires_by_and_cannot_redecide(proj):
+    run = new_run(proj)
+    t(proj, "gate", "--run", run, "--name", "cloud-apply", "--request", "plan")
+    d, rc = t(proj, "gate-decide", "--run", run, "--name", "cloud-apply", "--decision", "approve")
+    assert rc != 0 and "--by" in d["error"]
+    assert t(proj, "gate-decide", "--run", run, "--name", "cloud-apply", "--decision", "reject", "--by", "al")[1] == 0
+    d, rc = t(proj, "gate-decide", "--run", run, "--name", "cloud-apply", "--decision", "approve", "--by", "bob")
+    assert rc != 0 and "cannot be re-decided" in d["error"]
+    g = json.load(open(os.path.join(run, "state.json")))["gates"]["cloud-apply"]
+    assert g["status"] == "rejected" and g["decided_by"] == "al"

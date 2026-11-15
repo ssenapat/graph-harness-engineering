@@ -1,17 +1,21 @@
 #!/usr/bin/env python3
-"""PreToolUse guard specific to GHE (spec §13). Fail-open on parse errors, fail-closed on matches.
+"""PreToolUse guard specific to GHE (spec §13). Defense-in-depth only. Fails closed on matches AND on
+unreadable input or protected-action state (T27); it stays silent only in non-GHE projects.
 
 Blocks:
   * Write/Edit of ghe/runs/*/state.json          (only the runner writes it)
+  * Write/Edit of an existing hld.md/lld.md/CONTRACT.md without an approved design revision naming it (F19)
   * Write/Edit of ghe/runs/*/artifacts/source.md after discover froze it (hash recorded in state.json)
   * `terraform apply` / `terraform destroy` / destructive AWS CLI calls unless the matching human
-    gate (cloud-apply / destructive) is approved in the newest active run's state.json
+    gate (cloud-apply / destructive) is approved in the active run's state.json (the run named by
+    GHE_RUN_ID, else the single active run; several active runs and no id = deny)
   * never-override flags: -auto-approve on terraform apply without an approved gate
 Exit 2 + stderr message = block (Claude Code hook convention).
 
 Limits: this is a regex safety net against agent mistakes, not a security boundary. Determined
 shell tricks (variable-built paths, python -c, ...) can evade it; the runner's own checks and the
-human gates remain the real controls.
+human gates remain the real controls. Controlled actions are authorised by the runner
+(`ghe_tool.py authorize`); this hook is a second, weaker layer and makes no security-boundary claim.
 """
 import glob
 import json
@@ -27,21 +31,43 @@ def deny(msg):
     sys.exit(2)
 
 
-def active_state():
-    paths = sorted(glob.glob(os.path.join(ROOT, "ghe", "runs", "*", "state.json")), key=os.path.getmtime, reverse=True)
-    for p in paths:
+class Ambiguous(Exception):
+    pass
+
+
+def active_states():
+    out = []
+    for p in sorted(glob.glob(os.path.join(ROOT, "ghe", "runs", "*", "state.json"))):
         try:
             with open(p, encoding="utf-8") as fh:
                 st = json.load(fh)
         except (OSError, ValueError):
             continue
         if st.get("status") in ("RUNNING", "WAITING_HUMAN"):
-            return st
-    return None
+            out.append(st)
+    return out
+
+
+def active_state():
+    """F15: approval identity. Never guess by mtime. Use GHE_RUN_ID if set, else the single
+    active run; with several active runs and no id, raise Ambiguous (callers fail closed)."""
+    states = active_states()
+    want = os.environ.get("GHE_RUN_ID")
+    if want:
+        for st in states:
+            if st.get("run_id") == want:
+                return st
+        return None
+    if len(states) > 1:
+        raise Ambiguous(", ".join(str(s.get("run_id")) for s in states))
+    return states[0] if states else None
 
 
 def gate_ok(name):
-    st = active_state()
+    try:
+        st = active_state()
+    except Ambiguous as e:
+        deny(f"several active runs ({e}); set GHE_RUN_ID to the run this action belongs to")
     return bool(st and st.get("gates", {}).get(name, {}).get("status") == "approved")
 
 
@@ -74,7 +100,7 @@ def main():
     try:
         payload = json.load(sys.stdin)
     except ValueError:
-        sys.exit(0)
+        deny("unparsable hook payload in a GHE project; refusing (fail closed)")
     tool, inp = payload.get("tool_name", ""), payload.get("tool_input", {}) or {}
     if tool in ("Write", "Edit", "MultiEdit"):
         path = norm(inp.get("file_path") or "")
@@ -88,7 +114,37 @@ def main():
                     if json.load(fh).get("source_hash"):
                         deny("source.md is frozen after discover (the compaction anchor must stay byte-identical)")
             except (OSError, ValueError):
-                pass
+                deny("run state.json is missing or corrupt; refusing to touch source.md (fail closed)")
+        m = re.search(r"(ghe/runs/[^/]+)/artifacts/(hld|lld|CONTRACT)\.md$", path)
+        if m:   # F19: an authored design is changed only through an approved design revision
+            if os.path.isfile(os.path.join(ROOT, path)) or os.path.isfile(path):
+                name = os.path.basename(path)
+                try:
+                    with open(os.path.join(ROOT, m.group(1), "state.json"), encoding="utf-8") as fh:
+                        revs = (json.load(fh).get("design_revisions") or {})
+                except (OSError, ValueError):
+                    deny("run state.json is missing or corrupt; refusing to touch the design (fail closed)")
+                ok = any(isinstance(r, dict) and r.get("status") == "approved"
+                         and name in [os.path.basename(f) for f in (r.get("files") or [])]
+                         for r in revs.values())
+                if not ok:
+                    deny(f"{name} is an approved design artifact; propose a change with `design-propose` and "
+                         "get it approved with `design-decide` before editing it (F19)")
+    elif tool in ("Agent", "Task"):  # F09: tool-dispatch enforcement of the run token ceiling (second layer)
+        try:
+            st = active_state()
+        except Ambiguous as e:
+            deny(f"several active runs ({e}); set GHE_RUN_ID to the run this dispatch belongs to")
+        if st is not None:
+            try:
+                import yaml
+                with open(os.path.join(ROOT, "ghe", "config.yaml"), encoding="utf-8") as fh:
+                    ceiling = ((yaml.safe_load(fh) or {}).get("budgets") or {}).get("max_tokens_per_run")
+            except Exception:
+                ceiling = None
+            if isinstance(ceiling, int) and st.get("tokens_total", 0) >= ceiling:
+                deny("run token budget exhausted; no further agent dispatch (record usage with `tokens`, then "
+                     "`finish --status FAILED` or raise budgets.max_tokens_per_run in ghe/config.yaml)")
     elif tool == "Bash":
         cmd = inp.get("command", "")
         if PROTECTED_IN_CMD.search(cmd) and SHELL_WRITE.search(cmd) and not PLAIN_RUNNER_CALL.match(cmd):

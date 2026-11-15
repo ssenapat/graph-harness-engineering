@@ -6,6 +6,8 @@ jira:                    # placeholders: set per project by /ghe-setup. Never co
   board_id: null         # optional (numeric)
   epic_type: Epic
   task_type: Task
+  story_type: Story      # F17: Epic > Story > Sub-task; falls back to Task if the project lacks it
+  subtask_type: Sub-task
 defaults:
   roster: [ba, architect, qa, builder, devops, tester]   # Reviewer is opt-in
   deploy_target: local   # local | cloud
@@ -24,10 +26,13 @@ budgets:
   compaction:
     node_context_threshold: 0.70     # compact a node's context at 70% of its node budget
     run_soft_threshold: 0.80         # at 800k compact shared state, defer optional work, warn
-  max_rounds: 3                      # test -> triage -> fix rounds
-  max_story_revisions: 2
-  max_gate_revisions: 2
-  node_retry: 1
+  # Four different limits, never interchangeable (F10/F11):
+  node_retry: 1                      # TECHNICAL retries of one node after a failed/invalid attempt (extra starts)
+  max_rounds: 3                      # VERIFICATION rounds: test -> triage -> fix (each round re-tests)
+  correction_scope: story        # story (default: unrelated stories don't share allowances) | epic_global (one shared cap, T61)
+  max_story_revisions: 1             # SUBSTANTIVE correction: one revision of a story, then escalate
+  max_gate_revisions: 1              # one design/plan batch change per gate, then escalate
+  max_design_batches: 1              # approved design-revision batches per run (F19/F11), then escalate
 models:                              # tiers: top | mid | small  (mapped by the runner)
   architect: top
   builder_planner: top
@@ -45,3 +50,6 @@ gates:
 aws: {}                              # no defaults: region/account/credentials come from the requester per run
 docs_vault:
   enabled: false
+memory:                             # F22: bounded, relevance-scoped retrieval (runner `memory-manifest`)
+  max_entries: 12                   # entries selected per packet
+  max_chars: 6000                   # hard character budget; an essential entry that cannot fit pauses, never truncates
