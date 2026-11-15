@@ -63,14 +63,25 @@ Open Claude Code in the project you want to work on, then:
 
 ### Updating
 
-Plugin install:
+Updating is two steps. `/plugin update` gets the new GHE code. `/ghe:update` brings each project's config up to date.
+
+| Step | Command | What it does |
+|---|---|---|
+| 1 | `/plugin marketplace update graph-harness-engineering` | Refreshes the marketplace listing so the new version is visible |
+| 2 | `/plugin update ghe@graph-harness-engineering` | Installs the new plugin version (skills, agents, rules, hooks, runner) |
+| 3 | Restart Claude Code | Loads the new plugin |
+| 4 | `/ghe:update` (once in each project) | Migrates that project's `ghe/config.yaml` and asks about Graphify |
+
+You do not need `/ghe:update` to exist in your old install first. It arrives with step 2. Until you run step 4, existing projects keep working with the defaults of the new runner.
 
 ```
 /plugin marketplace update graph-harness-engineering
 /plugin update ghe@graph-harness-engineering
+# restart Claude Code, then in each project:
+/ghe:update
 ```
 
-Restart Claude Code, then run `/ghe:update` once in each project. (Copy-in install: re-run `bin/ghe-init <project> --force`, then `/ghe-update`.)
+Copy-in install: re-run `bin/ghe-init <project> --force`, then `/ghe-update`.
 
 `/ghe:update` is additive. It never changes a value you set. It adds commented examples for new settings, records `config_version`, and keeps `ghe/config.yaml.bak`. It asks one question: use Graphify? **Yes** (enables it; refused if the `graphify` executable is not found, so you can install it first), **No**, or **Ask me later** (nothing is written; treated as off). Graphify is optional and advisory; GHE works without it. To change the answer later, run `/ghe:update` again or `/ghe:graphify on|off`. `--dry-run` and `/ghe:graphify status` write nothing. Running `init` or `status` also applies the same additive migration and reminds you while Graphify is undecided; it never blocks a run. The update does not touch a run that is in progress.
 
