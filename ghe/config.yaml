@@ -1,4 +1,5 @@
 # ghe/config.yaml — per-project GHE configuration (spec §10.4)
+config_version: 2        # managed by `ghe update`; do not lower
 tracker: local           # jira | local. /ghe-setup switches to jira once the values below are filled in
 jira:                    # placeholders: set per project by /ghe-setup. Never commit real org values to a shared toolkit.
   site: "https://<your-org>.atlassian.net"

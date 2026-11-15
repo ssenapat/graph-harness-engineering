@@ -68,7 +68,10 @@ def load_yaml(path):
     text = read(path)
     if text is None:
         out({"ok": False, "error": f"missing file: {path}"}, 2)
-    return yaml.safe_load(text) or {}
+    try:
+        return yaml.safe_load(text) or {}
+    except yaml.YAMLError as exc:
+        out({"ok": False, "error": f"{path} is not valid YAML: {str(exc).splitlines()[0] if str(exc) else exc}"}, 2)
 
 
 def load_json(path, default=None):
@@ -295,7 +298,9 @@ def cmd_init(a, c):
         st = load_json(os.path.join(run, "state.json"))
         if not isinstance(st, dict):
             refuse(f"no resumable run {a.resume!r} (state.json missing or unreadable)")
-        out({"ok": True, "run_id": a.resume, "run_dir": run, "status": st.get("status"), "resumed": True})
+        res = {"ok": True, "run_id": a.resume, "run_dir": run, "status": st.get("status"), "resumed": True}
+        note = config_notice(c)
+        out({**res, "config_update": note} if note else res)
     if a.run_id is not None:
         if not RUN_ID_RE.match(a.run_id):
             refuse(f"invalid run id {a.run_id!r} (letters, digits, . _ - ; max 64; must start alphanumeric)")
@@ -325,7 +330,9 @@ def cmd_init(a, c):
           "tokens_total": 0, "round": 0, "nodes": {}, "gates": {}, "compactions": [],
           "fingerprints": {}, "warnings": []}
     write_json(os.path.join(run, "state.json"), st)
-    out({"ok": True, "run_id": run_id, "run_dir": run})
+    res = {"ok": True, "run_id": run_id, "run_dir": run}
+    note = config_notice(c)
+    out({**res, "config_update": note} if note else res)
 
 
 GITIGNORE_LINES = ("ghe/", ".claude/worktrees/", ".claude/settings.local.json")
@@ -771,10 +778,12 @@ def cmd_skip(a, c):
 
 def cmd_status(a, c):
     st = c.state()
-    out({"ok": True, "run_id": st["run_id"], "status": st["status"], "round": st["round"],
-         "tokens_total": st["tokens_total"], "gates": st["gates"],
-         "nodes": {k: v["status"] for k, v in st["nodes"].items()},
-         "pending_gate": next((k for k, v in st["gates"].items() if v.get("status") == "waiting"), None)})
+    res = {"ok": True, "run_id": st["run_id"], "status": st["status"], "round": st["round"],
+           "tokens_total": st["tokens_total"], "gates": st["gates"],
+           "nodes": {k: v["status"] for k, v in st["nodes"].items()},
+           "pending_gate": next((k for k, v in st["gates"].items() if v.get("status") == "waiting"), None)}
+    note = config_notice(c)
+    out({**res, "config_update": note} if note else res)
 
 
 def finish_problems(c, st):
@@ -1971,6 +1980,187 @@ def cmd_repos(a, c):
     out({"ok": False, "error": f"unknown repos action {act}"}, 2)
 
 
+# --------------------------------------------------------------------------- config update / migration
+# `update` brings an existing project's ghe/config.yaml up to date after the toolkit was updated.
+# It is ADDITIVE: it never changes a value the user set. Optional new settings are appended as
+# commented examples; the only value it ever writes is graphify.enabled, and only when the user
+# decided (--graphify true|false). Every change keeps ghe/config.yaml.bak and is validated.
+CONFIG_VERSION = 2
+CONFIG_MARKER = "# --- added by `ghe update` (config_version {v}) ---"
+CONFIG_NOTES = {
+    "context": ("# Bounded context packets for large sources (these are the defaults; the keys are optional)\n"
+                "#context:\n#  max_entries: 12\n#  max_chars: 6000\n#  max_source_bytes: 2000000\n"),
+    "graphify": ("# Optional Graphify provider (advisory only; GHE works without it).\n"
+                 "# Decide with `/ghe:graphify on|off` (or `/ghe-graphify`), which writes `enabled: true|false` here.\n"
+                 "#graphify:\n#  enabled: false\n#  command: graphify\n#  timeout_seconds: 120\n"),
+}
+
+
+def _config_paths(root):
+    p = os.path.join(root, "ghe", "config.yaml")
+    return p, p + ".bak"
+
+
+def graphify_decision(cfg):
+    """('enabled'|'disabled'|'undecided'|'invalid', bool_or_None). Absent key = undecided (treated as off)."""
+    g = (cfg or {}).get("graphify")
+    en = g.get("enabled") if isinstance(g, dict) else None
+    if isinstance(en, bool):
+        return ("enabled" if en else "disabled"), en
+    return ("undecided" if en is None else "invalid"), None
+
+
+def graphify_command(cfg):
+    g = (cfg or {}).get("graphify")
+    cmd = g.get("command") if isinstance(g, dict) else None
+    return cmd.strip() if isinstance(cmd, str) and cmd.strip() else "graphify"
+
+
+def graphify_installed(cfg):
+    cmd = graphify_command(cfg)
+    return bool(shutil.which(cmd)) if not os.path.dirname(cmd) else os.access(cmd, os.X_OK)
+
+
+def _set_top_level_scalar(text, key, value_text):
+    """Set `key: value` at the top level of a YAML text, preserving everything else. Appends when absent."""
+    lines = text.split("\n")
+    for i, ln in enumerate(lines):
+        if re.match(rf"^{re.escape(key)}\s*:", ln):
+            lines[i] = f"{key}: {value_text}"
+            return "\n".join(lines)
+    if lines and lines[-1] == "":
+        lines.pop()
+    return "\n".join(lines) + f"\n{key}: {value_text}\n"
+
+
+def _set_graphify_enabled_text(text, value):
+    """Write graphify.enabled by editing the text (comments and other keys survive)."""
+    val = "true" if value else "false"
+    lines = text.split("\n")
+    for i, ln in enumerate(lines):
+        m = re.match(r"^graphify\s*:\s*(.*)$", ln)
+        if not m:
+            continue
+        rest = re.sub(r"\s+#.*$", "", m.group(1)).strip()
+        if rest in ("", ):  # block mapping
+            j = i + 1
+            while j < len(lines) and (not lines[j].strip() or lines[j][:1] in (" ", "\t", "#")):
+                j += 1
+            for k in range(i + 1, j):
+                mm = re.match(r"^(\s+)enabled\s*:\s*[^#\n]*?(\s*#.*)?$", lines[k])
+                if mm:
+                    lines[k] = f"{mm.group(1)}enabled: {val}{mm.group(2) or ''}"
+                    return "\n".join(lines)
+            lines.insert(i + 1, f"  enabled: {val}")
+            return "\n".join(lines)
+        if rest in ("null", "~", "{}"):
+            lines[i] = f"graphify:\n  enabled: {val}"
+            return "\n".join(lines)
+        raise ValueError("graphify: is written in a form `update` will not edit; set enabled: %s by hand" % val)
+    if lines and lines[-1] == "":
+        lines.pop()
+    return "\n".join(lines) + f"\ngraphify:\n  enabled: {val}\n"
+
+
+def migrate_config(root, graphify=None, dry_run=False, force_enable=False):
+    """Return a result dict (never raises for user-data problems; ok=False + error instead)."""
+    path, bak = _config_paths(root)
+    if not os.path.isfile(path):
+        return {"ok": False, "error": "GHE is not set up in this project (ghe/config.yaml is missing). Run /ghe-setup first."}
+    try:
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+        old = yaml.safe_load(text) if text.strip() else {}
+    except (OSError, yaml.YAMLError) as exc:
+        return {"ok": False, "error": f"ghe/config.yaml is unreadable: {exc}"}
+    if not isinstance(old, dict):
+        return {"ok": False, "error": "ghe/config.yaml must be a YAML mapping"}
+    v_old = old.get("config_version", 1)
+    v_old = v_old if isinstance(v_old, int) and not isinstance(v_old, bool) else 1
+    if v_old > CONFIG_VERSION:
+        return {"ok": False, "error": f"ghe/config.yaml is config_version {v_old}, newer than this toolkit ({CONFIG_VERSION}); update the toolkit"}
+    decision, _ = graphify_decision(old)
+    if decision == "invalid":
+        return {"ok": False, "error": "graphify.enabled must be true or false"}
+    installed = graphify_installed(old)
+    if graphify is True and not installed and not force_enable:
+        return {"ok": False, "action": "not_installed", "installed": False,
+                "error": f"graphify executable {graphify_command(old)!r} was not found. Install Graphify first, "
+                         "or choose false (GHE works without it); you can run this again later."}
+    new, added = text, []
+    if v_old < CONFIG_VERSION:
+        notes = [k for k in CONFIG_NOTES if k not in old and not (k == "graphify" and graphify is not None)]
+        if notes:
+            if not new.endswith("\n"):
+                new += "\n"
+            new += "\n" + CONFIG_MARKER.format(v=CONFIG_VERSION) + "\n" + "".join(CONFIG_NOTES[k] for k in notes)
+            added += [f"{k} (commented example)" for k in notes]
+    if graphify is not None:
+        if decision != ("enabled" if graphify else "disabled"):
+            try:
+                new = _set_graphify_enabled_text(new, graphify)
+            except ValueError as exc:
+                return {"ok": False, "error": str(exc)}
+            added.append(f"graphify.enabled: {'true' if graphify else 'false'}")
+    if v_old < CONFIG_VERSION:
+        new = _set_top_level_scalar(new, "config_version", str(CONFIG_VERSION))
+        added.append(f"config_version: {CONFIG_VERSION}")
+    # validate: parses, and nothing the user set changed (except graphify.enabled, which they asked for)
+    try:
+        cur = yaml.safe_load(new) if new.strip() else {}
+    except yaml.YAMLError as exc:
+        return {"ok": False, "error": f"update would produce invalid YAML ({exc}); nothing was changed"}
+    expect = json.loads(json.dumps(old))
+    expect["config_version"] = max(v_old, CONFIG_VERSION) if v_old < CONFIG_VERSION else v_old
+    if graphify is not None:
+        g = expect.get("graphify") if isinstance(expect.get("graphify"), dict) else {}
+        g["enabled"] = graphify
+        expect["graphify"] = g
+    if not isinstance(cur, dict) or json.loads(json.dumps(cur)) != expect:
+        return {"ok": False, "error": "update would change existing settings; nothing was changed (please report this)"}
+    changed = new != text
+    if changed and not dry_run:
+        atomic_write_text(bak, text)
+        atomic_write_text(path, new)
+    d2, en2 = graphify_decision(cur)
+    warnings = []
+    runs = os.path.join(root, "ghe", "runs")
+    for name in sorted(os.listdir(runs)) if os.path.isdir(runs) else []:
+        s = load_json(os.path.join(runs, name, "state.json"))
+        if isinstance(s, dict) and s.get("status") in ("RUNNING", "WAITING_HUMAN"):
+            warnings.append(f"run {name} is {s['status']}; the update is additive and does not touch run state")
+    res = {"ok": True, "changed": changed, "dry_run": bool(dry_run), "from_version": v_old, "to_version": max(v_old, CONFIG_VERSION),
+           "added": added, "backup": os.path.relpath(bak, root) if changed and not dry_run else None,
+           "graphify": {"decision": d2, "enabled": bool(en2), "installed": installed, "command": graphify_command(cur)},
+           "needs_decision": d2 == "undecided", "warnings": warnings}
+    if d2 == "enabled" and not installed:
+        res["warnings"].append(f"graphify is enabled but {graphify_command(cur)!r} was not found; GHE falls back to reading the source directly")
+    return res
+
+
+def config_notice(c):
+    """Automatic additive migration for init/status. Never blocks or breaks a run; returns a small notice or None."""
+    try:
+        r = migrate_config(c.root)
+    except Exception as exc:  # noqa: BLE001  the run must never fail because of the notice
+        return {"error": f"config check failed: {exc}"}
+    if not r.get("ok"):
+        return {"error": r.get("error")}
+    if r["changed"] or r["needs_decision"]:
+        n = {"changed": r["changed"], "added": r["added"], "needs_decision": r["needs_decision"]}
+        if r["needs_decision"]:
+            n["graphify"] = r["graphify"]
+            n["hint"] = "Graphify is undecided (treated as off). Ask the user, then run: update --graphify true|false"
+        return n
+    return None
+
+
+def cmd_update(a, c):
+    gf = None if a.graphify is None else (a.graphify == "true")
+    r = migrate_config(c.root, graphify=gf, dry_run=a.dry_run or a.check, force_enable=a.force)
+    out(r, 0 if r.get("ok") else 1)
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--root")
@@ -1986,6 +2176,8 @@ def main():
         sp.set_defaults(fn=fn)
 
     add("init", cmd_init, ("--run-id", {}), ("--resume", {}), run=False)
+    add("update", cmd_update, ("--graphify", {"choices": ["true", "false"]}), ("--dry-run", {"action": "store_true"}),
+        ("--check", {"action": "store_true"}), ("--force", {"action": "store_true"}), run=False)
     add("bootstrap", cmd_bootstrap, ("--workspace", {"action": "store_true"}), run=False)
     add("repos", cmd_repos, ("action", {"choices": ["find", "list", "add", "clone"]}), ("--hint", {"action": "append"}),
         ("--name", {}), ("--path", {}), ("--url", {}), ("--confirmed", {"action": "store_true"}), run=False)

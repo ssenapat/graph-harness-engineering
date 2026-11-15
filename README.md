@@ -32,6 +32,8 @@ Skills are namespaced:
 | `/ghe:setup` | One-time per project. Bootstraps `ghe/`, detects the stack and validation commands, asks for the Jira site and project |
 | `/ghe:run <input>` | Starts a run, or resumes a waiting one |
 | `/ghe:status` | Shows nodes, rounds, tokens used and what is waiting on a human |
+| `/ghe:update` | After updating the plugin: brings this project's `ghe/config.yaml` up to date and asks about Graphify (see "Updating") |
+| `/ghe:graphify on\|off\|status` | Turns the optional Graphify provider on or off, or shows its state |
 
 To try it straight from a checkout of this repo: `claude --plugin-dir ./plugin`.
 
@@ -58,6 +60,19 @@ Open Claude Code in the project you want to work on, then:
 
 3. **Answer questions:** if the run pauses (`WAITING_HUMAN`), answer in the CLI or as a comment on the Jira ticket, then `/ghe:run --resume <run-id>`.
 4. **Check progress:** `/ghe:status`. The final report is `RUN-REPORT.md` (see "Where artifacts are stored").
+
+### Updating
+
+Plugin install:
+
+```
+/plugin marketplace update graph-harness-engineering
+/plugin update ghe@graph-harness-engineering
+```
+
+Restart Claude Code, then run `/ghe:update` once in each project. (Copy-in install: re-run `bin/ghe-init <project> --force`, then `/ghe-update`.)
+
+`/ghe:update` is additive. It never changes a value you set. It adds commented examples for new settings, records `config_version`, and keeps `ghe/config.yaml.bak`. It asks one question: use Graphify? **Yes** (enables it; refused if the `graphify` executable is not found, so you can install it first), **No**, or **Ask me later** (nothing is written; treated as off). Graphify is optional and advisory; GHE works without it. To change the answer later, run `/ghe:update` again or `/ghe:graphify on|off`. `--dry-run` and `/ghe:graphify status` write nothing. Running `init` or `status` also applies the same additive migration and reminds you while Graphify is undecided; it never blocks a run. The update does not touch a run that is in progress.
 
 ### New project vs existing project
 
@@ -173,6 +188,13 @@ Each run is independent. A new run does not read earlier folders under `ghe/runs
 - **Bounded retries:** identical failures escalate as "no progress" instead of looping.
 - **Human gates:** requirement review (optional) and cloud `terraform apply` / destroy.
 - **AWS region and credentials come from whoever makes the request.** The agent asks if they are missing and never stores them in artifacts, Jira or summaries.
+- **Runner-enforced rules, not prompts:** state writes are atomic and every per-run command holds `RUN_DIR/.lock` (stale locks are broken after 60s, cross-platform). `start` refuses unmet dependencies, running/done nodes, waiting or terminal runs and an exhausted budget. `finish --status DONE` is refused without `RUN-REPORT.md`, with traceability gaps, or without deterministic verification (`verify`) or a recorded waiver. `result` is idempotent by digest and rejects traversal, absolute and symlink-escape artifact paths. Defects must carry current plan/source evidence (F12/T16).
+- **Budgets and corrections:** usage is ingested once per event id, per-node and per-role caps apply, and concurrent starts cannot over-reserve the run ceiling. Retry rules are separate: `node_retry` (technical), `max_rounds` (verification), `max_story_revisions` (substantive correction) and `max_gate_revisions`. Further corrections need an explicit, identified `allowance-grant`; `correction_scope` is `story` (default) or `epic_global`.
+- **Controlled actions:** `authorize` records who approved a cloud-apply or destructive action. The `ghe_guard.py` hook is a second layer; it also blocks edits to runner-owned state, a frozen `source.md`, a started `Agent` dispatch over budget, and edits to design files (HLD/LLD/CONTRACT) without an approved design revision (`design-propose` / `design-decide`).
+- **Side effects and trackers:** `journal-intent` / `journal-confirm` / `journal-reconcile` record external writes so a crash cannot cause a duplicate; `finish` refuses while one is unresolved. Tickets are idempotent per (kind, node, ref) with epic > story > subtask hierarchy. Tracker outage, switching and human edits are handled explicitly (`tracker-down`, `tracker-switch`, `ticket-attach`, `ticket-field`).
+- **Memory and context:** `memory-manifest` builds a bounded, relevance-ranked packet (superseded entries excluded, nothing truncated silently). `context-packet` does the same for large sources. `escalation-report` renders the human escalation package from recorded state with no LLM.
+- **Optional Graphify:** off by default. `ghe/runner/ghe_graph.py` (`preflight`, `retrieve`, `status`) falls back to bounded direct file retrieval if Graphify is missing, stale, failing or times out. Graph results are advisory, inferred edges are never authoritative, and nothing is uploaded unless semantic extraction is explicitly approved. See `ghe/runner/GRAPHIFY.md`. The Graphify CLI flags and output format are unverified guesses, configurable in `ghe/config.yaml`.
+- **Release:** `release-check`, `release-record` and `release-cleanup` gate production releases on verification and the cloud-apply gate, and record the local process for safe cleanup. `deploy-target` asks the requester for region/account and never stores credentials.
 
 ## Claude Code trust note
 
@@ -182,7 +204,7 @@ Run Claude Code interactively in the project once and accept the trust dialog, o
 
 ```
 .claude/{agents,skills,hooks,rules}/   # source of the toolkit
-ghe/{runner,config.yaml,graph.yaml,templates,schemas}/
+ghe/{runner (ghe_tool.py, ghe_graph.py),config.yaml,graph.yaml,templates,schemas}/
 plugin/                                # GENERATED from the above. Do not edit by hand
 .claude-plugin/marketplace.json
 bin/ghe-init                           # copy-in installer
@@ -197,4 +219,7 @@ After changing anything under `.claude/` or `ghe/`, run `bin/ghe-build-plugin` a
 
 ```bash
 python3 -m pytest tests -q
+bin/ghe-build-plugin --check   # plugin/ must match the sources
 ```
+
+The tests cover the runner (`test_ghe_tool.py`, `test_ghe_hardening.py`, `test_ghe_stage2.py`, `test_ghe_stage4.py`), hooks, plugin sync, Graphify (`test_ghe_graph.py`) and skill rules (`test_ghe_skills.py`). Agent behaviour that follows the skills is not covered by automated tests, and real Jira API calls and the real Graphify CLI have not been exercised.
