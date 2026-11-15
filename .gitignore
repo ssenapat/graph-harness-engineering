@@ -5,3 +5,4 @@ __pycache__/
 ghe/runs/*
 !ghe/runs/.gitkeep
 .git-token.txt
+CLAUDE.local.md
