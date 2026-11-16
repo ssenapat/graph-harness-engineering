@@ -1,6 +1,9 @@
 # Changelog
 ## [Unreleased]
 
+### Added
+- Jira tracker: story and defect tickets are required before `finish`; `jira.assign_to`; `ticket-status` and `ticket-summary` commands; run report Tickets section; setup asks for assignee policy and resolves issue types.
+
 ## [0.3.0]
 ### Added
 - `ghe_tool.py update` (skill `/ghe-update`, plugin `/ghe:update`): additive, validated, backed-up (`config.yaml.bak`) migration of an existing project's `ghe/config.yaml`. Never changes values you set; adds commented examples for the new `context` and `graphify` keys and `config_version: 2`. `--dry-run`/`--check` write nothing.

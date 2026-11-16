@@ -7,6 +7,8 @@
 |---|---|---|---|
 ## Traceability
 (link to traceability.md; list gaps)
+## Tickets
+(tracker: jira — paste `T ticket-summary` markdown: created / assigned / transitioned)
 ## Test rounds
 | Round | Failing | Verdict |
 |---|---|---|

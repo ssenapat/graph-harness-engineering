@@ -6,6 +6,9 @@ The graph is data (`ghe/graph.yaml`). A small Python runner (`ghe/runner/ghe_too
 
 **Runner guarantees** (hardening F01-F04): state writes are atomic; every per-run command holds `RUN_DIR/.lock` (cross-platform, stale locks are broken after a dead owner or 60s); `init` never overwrites a run (`--resume <id>` to continue one); `start` refuses unmet dependencies, running/done nodes, waiting or terminal runs and exhausted budgets; `skip` needs `--reason` and an `optional` node; `finish --status DONE` is refused unless the run really is complete; `result` needs a started node, is idempotent, and only accepts artifacts inside `artifacts/`. The lock is tested on macOS; on Windows it is implemented but not verified.
 
+
+**Jira tracker rules (runner-enforced).** With `tracker: jira`, `finish` and the planner's `result` are refused while any story in `plans/stories.json` or any defect lacks a ticket, and while a done story's ticket is not Done. `jira.assign_to` (`requester`, an account id, or `none`) controls assignment. `T ticket-status` records transitions and `T ticket-summary` feeds the run report's Tickets section. Setup resolves the site's issue types once into `jira.issue_types`.
+
 ## Prerequisites
 
 - Claude Code, Python 3.9+, and `pip install pyyaml`.

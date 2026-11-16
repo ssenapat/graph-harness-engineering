@@ -9,6 +9,7 @@ jira:                    # placeholders: set per project by /ghe-setup. Never co
   task_type: Task
   story_type: Story      # F17: Epic > Story > Sub-task; falls back to Task if the project lacks it
   subtask_type: Sub-task
+  assign_to: none        # account id | requester | none  (who new tickets are assigned to)
 defaults:
   roster: [ba, architect, qa, builder, devops, tester]   # Reviewer is opt-in
   deploy_target: local   # local | cloud

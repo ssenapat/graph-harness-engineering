@@ -269,6 +269,9 @@ def jira_config_problems(config):
         problems.append(f"jira.site is not set ({site or 'empty'})")
     if not re.match(r"^[A-Z][A-Z0-9]+$", proj):
         problems.append(f"jira.project is not a valid project key ({proj or 'empty'})")
+    at = j.get("assign_to", "none")
+    if not isinstance(at, str) or not at.strip():
+        problems.append("jira.assign_to must be an account id, 'requester' or 'none'")
     return problems
 
 
@@ -632,6 +635,8 @@ def cmd_result(a, c):
         for need in (resolved_nodes(c).get(a.node) or {}).get("criteria") or []:  # T06: graph-required criteria
             if not isinstance(ec, dict) or need not in ec:
                 problems.append(f"required exit criterion missing: {need} (graph criteria)")
+    if res.get("status") == "done" and "plans/stories.json" in (res.get("artifacts") or []):
+        problems += [f"exit criterion not met: {p}" for p in ticket_problems(c, st) if "no Jira ticket" in p and p.startswith("story")]
     arts = res.get("artifacts")
     if arts is not None and not isinstance(arts, list):
         problems.append("artifacts must be a list")
@@ -775,6 +780,7 @@ def finish_problems(c, st):
         if v.get("status") not in ("passed", "waived"):
             problems.append("no Tester ran and no deterministic verification passed or was waived "
                             "(run `verify`, or `verify --waive --reason ... --by ...`)")
+    problems += ticket_problems(c, st)
     gaps = trace_compute(c)[1]
     problems += [f"traceability gap: {g}" for g in gaps]
     if st.get("round", 0) > 0:
@@ -1054,6 +1060,17 @@ def cmd_ticket(a, c):
         out({"ok": False, "error": f"this Jira site has no {a.kind} issue type: set jira.issue_types.{a.kind} "
              "to the equivalent type in ghe/config.yaml (or use tracker: local)"}, 2)
     reg[ident] = {"key": a.key, "kind": a.kind, "node": a.node, "ref": a.ref, "title": a.title, "created": now()}
+    if c.config.get("tracker") == "jira":   # assignment policy: jira.assign_to = account id | requester | none
+        policy = str((c.config.get("jira") or {}).get("assign_to", "none")).strip()
+        who = (a.assignee or "").strip()
+        if not who and policy not in ("none", "requester"):
+            who = policy
+        if not who and policy == "requester":
+            reg.pop(ident)
+            refuse("jira.assign_to is 'requester': pass --assignee <the requester's Jira account id> "
+                   "(look it up once with atlassianUserInfo)")
+        if who:
+            reg[ident]["assignee"] = who
     if c.config.get("tracker") == "jira" and itypes.get(a.kind):
         reg[ident]["issue_type"] = str(itypes[a.kind])
     if a.parent:
@@ -1063,6 +1080,68 @@ def cmd_ticket(a, c):
         with ledger_txn(c) as led:
             led["tickets"].setdefault(f"{c.config.get('tracker')}:{a.kind}:{a.ref}", dict(reg[ident]))
     out({"ok": True, "existing": False, "ticket": reg[ident]})
+
+TICKET_STATUSES = ("To Do", "In Progress", "Blocked", "Done")
+
+
+def _ticket_by_key(st, key):
+    return next((t for t in (st.get("tickets") or {}).values() if t.get("key") == key), None)
+
+
+def cmd_ticket_status(a, c):
+    """Record that a ticket was transitioned in the tracker (the skill calls transitionJiraIssue first).
+    History is kept so the run report can show what moved and when."""
+    st = c.state()
+    t = _ticket_by_key(st, a.key)
+    if t is None:
+        refuse(f"unknown ticket {a.key}", 2)
+    if a.status not in TICKET_STATUSES:
+        refuse(f"status must be one of {', '.join(TICKET_STATUSES)}")
+    if a.status == "Blocked" and not a.reason.strip():
+        refuse("Blocked needs --reason (the human gate or blocker; also comment it on the ticket)")
+    if t.get("status") == a.status:
+        out({"ok": True, "unchanged": True, "ticket": t})
+    t["status"] = a.status
+    t.setdefault("history", []).append({"status": a.status, "at": now(), "reason": a.reason.strip()})
+    c.save(st)
+    out({"ok": True, "unchanged": False, "ticket": t})
+
+
+def ticket_problems(c, st):
+    """tracker: jira -> every planned story and every defect must have a ticket; done stories must be Done
+    in the tracker. No-op for tracker: local."""
+    if c.config.get("tracker") != "jira":
+        return []
+    problems = []
+    reg = st.get("tickets") or {}
+    refs = {(t.get("kind"), t.get("ref")): t for t in reg.values()}
+    stories = (load_json(c.art("plans", "stories.json")) or {}).get("stories", [])
+    for s in stories:
+        sid = s.get("id")
+        t = refs.get(("story", sid))
+        if t is None:
+            problems.append(f"story {sid} has no Jira ticket (ticket --kind story --ref {sid} --parent <epic>)")
+        elif ((st.get("stories") or {}).get(sid) or {}).get("status") == "done" and t.get("status") != "Done":
+            problems.append(f"story {sid} is done but ticket {t['key']} is {t.get('status', 'To Do')} "
+                            f"(transition it, then ticket-status --status Done)")
+    for fn in sorted(os.listdir(c.art("defects"))) if os.path.isdir(c.art("defects")) else []:
+        for d in (load_json(c.art("defects", fn)) or {}).get("defects", []) or []:
+            ref = f"defect:{d.get('id')}"
+            if d.get("id") is not None and ("task", ref) not in refs and ("story", ref) not in refs:
+                problems.append(f"defect {d.get('id')} has no Jira ticket (ticket --kind task --ref {ref}, linked to the epic)")
+    return problems
+
+
+def cmd_ticket_summary(a, c):
+    """Tickets created / assigned / transitioned, for the run report."""
+    st = c.state()
+    ts = list((st.get("tickets") or {}).values())
+    moved = [t for t in ts if t.get("history")]
+    lines = [f"- Tickets created: {len(ts)} ({', '.join(sorted({t['kind'] for t in ts})) or 'none'})",
+             f"- Assigned: {sum(1 for t in ts if t.get('assignee'))} of {len(ts)}",
+             f"- Transitioned: {len(moved)} ({sum(len(t['history']) for t in moved)} transitions)"]
+    out({"ok": True, "created": len(ts), "assigned": sum(1 for t in ts if t.get("assignee")),
+         "transitioned": len(moved), "markdown": "\n".join(lines)})
 
 
 def cmd_own_check(a, c):
@@ -2151,7 +2230,10 @@ def main():
     add("trace", cmd_trace)
     add("ticket", cmd_ticket, ("--kind", {"default": "task", "choices": sorted(TICKET_PARENT_KIND)}), ("--node", {"default": "-"}), ("--ref", {"default": ""}),
         ("--key", {}), ("--title", {"default": ""}), ("--list", {"action": "store_true"}),
-        ("--parent", {"default": ""}))
+        ("--parent", {"default": ""}), ("--assignee", {"default": ""}))
+    add("ticket-status", cmd_ticket_status, ("--key", {"required": True}), ("--status", {"required": True}),
+        ("--reason", {"default": ""}))
+    add("ticket-summary", cmd_ticket_summary)
     add("story", cmd_story, ("--id", {"required": True}), ("--status", {"choices": ["pending", "running", "done", "revise", "blocked"]}))
     add("gate", cmd_gate, ("--name", {"required": True}), ("--request", {"required": True}))
     add("gate-decide", cmd_gate_decide, ("--name", {"required": True}),
