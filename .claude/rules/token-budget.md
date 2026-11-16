@@ -1,9 +1,7 @@
-# Token budget and compaction (spec §11)
+# Token usage and compaction (spec §11)
 
-- The run ceiling is 1,000,000 tokens (in + out + cache write + cache read). Per-node caps are in `ghe/config.yaml`.
+- There are no token limits or caps. Usage is recorded and reported, never enforced.
 - Keep prompts small: pass artifact PATHS, not contents. Use the cheapest model tier that fits (`models:` in config).
-- The orchestrator calls `ghe_tool.py budget --node <n>` before each node and after each node's tokens are recorded.
-  - `compact_node` (node at 70% of its cap): the agent must write `context-summary.md` per the `compact` skill.
-  - `compact_run` (run at 80%): compact shared state, skip optional work, warn.
-  - `stop_node` / `stop`: stop that node (or the run) and escalate. Never silently continue past a cap.
+- Record each node's tokens with `ghe_tool.py tokens --node <n> --add <total>`; `ghe_tool.py budget` reports the totals only.
+- The `compact` skill is optional: use it when a node's context gets large.
 - A summary may never replace the request: `source.md` is the anchor, quoted verbatim, and `ghe_tool.py drift-check` must pass.

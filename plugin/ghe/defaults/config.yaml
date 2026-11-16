@@ -15,18 +15,7 @@ defaults:
   max_parallel_agents: 4
   test_concurrency: 4
 budgets:
-  max_tokens_per_run: 1000000        # hard ceiling; counts in + out + cache write + cache read
-  max_tokens_per_node:               # sums to 860k; 140k reserved for fix rounds
-    ba: 60000
-    architect: 120000
-    qa: 80000
-    builder: 400000
-    devops: 80000
-    tester: 120000
-  reserve_for_fix_rounds: 140000
-  compaction:
-    node_context_threshold: 0.70     # compact a node's context at 70% of its node budget
-    run_soft_threshold: 0.80         # at 800k compact shared state, defer optional work, warn
+  # No token limits: usage is recorded (`tokens`) and reported, never capped.
   # Four different limits, never interchangeable (F10/F11):
   node_retry: 1                      # TECHNICAL retries of one node after a failed/invalid attempt (extra starts)
   max_rounds: 3                      # VERIFICATION rounds: test -> triage -> fix (each round re-tests)

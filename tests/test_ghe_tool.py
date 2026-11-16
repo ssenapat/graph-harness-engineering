@@ -206,16 +206,6 @@ def test_drift_work_remaining_cannot_list_done_nodes(proj):
     assert rc == 1 and any("finished node" in f for f in d["failures"])
 
 
-def test_budget_actions(proj):
-    run = new_run(proj)
-    t(proj, "resolve", "--run", run)
-    assert t(proj, "budget", "--run", run, "--node", "architect")[0]["action"] == "ok"
-    t(proj, "tokens", "--run", run, "--node", "architect", "--add", "90000", "--event", "e0")
-    assert t(proj, "budget", "--run", run, "--node", "architect")[0]["actions"] == ["compact_node"]
-    t(proj, "tokens", "--run", run, "--node", "builder", "--add", "760000", "--event", "e1")
-    assert t(proj, "budget", "--run", run, "--node", "builder")[0]["actions"] == ["compact_run", "stop_node"]
-    t(proj, "tokens", "--run", run, "--node", "tester", "--add", "200000", "--event", "e2")
-    assert t(proj, "budget", "--run", run)[0]["action"] == "stop"
 
 
 def test_trace_gaps(proj):
@@ -337,3 +327,13 @@ def test_f16_gate_decide_requires_by_and_cannot_redecide(proj):
     assert rc != 0 and "cannot be re-decided" in d["error"]
     g = json.load(open(os.path.join(run, "state.json")))["gates"]["cloud-apply"]
     assert g["status"] == "rejected" and g["decided_by"] == "al"
+
+
+def test_no_token_limits_budget_only_reports(proj):
+    run = new_run(proj)
+    t(proj, "tokens", "--run", run, "--node", "builder", "--add", "50000000", "--event", "e1")
+    d, rc = t(proj, "budget", "--run", run, "--node", "builder")
+    assert rc == 0 and d["action"] == "ok" and d["actions"] == [] and d["tokens_total"] == 50000000
+    t(proj, "resolve", "--run", run)
+    d, rc = t(proj, "start", "--run", run, "--node", "discover")
+    assert rc == 0, d

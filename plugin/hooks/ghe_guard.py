@@ -130,21 +130,6 @@ def main():
                 if not ok:
                     deny(f"{name} is an approved design artifact; propose a change with `design-propose` and "
                          "get it approved with `design-decide` before editing it (F19)")
-    elif tool in ("Agent", "Task"):  # F09: tool-dispatch enforcement of the run token ceiling (second layer)
-        try:
-            st = active_state()
-        except Ambiguous as e:
-            deny(f"several active runs ({e}); set GHE_RUN_ID to the run this dispatch belongs to")
-        if st is not None:
-            try:
-                import yaml
-                with open(os.path.join(ROOT, "ghe", "config.yaml"), encoding="utf-8") as fh:
-                    ceiling = ((yaml.safe_load(fh) or {}).get("budgets") or {}).get("max_tokens_per_run")
-            except Exception:
-                ceiling = None
-            if isinstance(ceiling, int) and st.get("tokens_total", 0) >= ceiling:
-                deny("run token budget exhausted; no further agent dispatch (record usage with `tokens`, then "
-                     "`finish --status FAILED` or raise budgets.max_tokens_per_run in ghe/config.yaml)")
     elif tool == "Bash":
         cmd = inp.get("command", "")
         if PROTECTED_IN_CMD.search(cmd) and SHELL_WRITE.search(cmd) and not PLAIN_RUNNER_CALL.match(cmd):

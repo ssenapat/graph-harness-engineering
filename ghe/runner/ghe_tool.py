@@ -530,24 +530,9 @@ def ancestors(nodes, name, seen=None):
     return seen
 
 
-def node_cap(c, node):
-    """Token cap for a node: exact node name first, else the node's agent role (F08).
-    Config keys are validated by `config_budget_problems`."""
-    caps = c.config["budgets"].get("max_tokens_per_node", {}) or {}
-    if node in caps:
-        return caps[node]
-    role = (resolved_nodes(c).get(node) or {}).get("agent")
-    return caps.get(role) if role else None
-
-
 def config_budget_problems(c):
-    """Cap keys that name neither a node nor an agent role of the resolved graph would never apply."""
-    caps = c.config["budgets"].get("max_tokens_per_node", {}) or {}
-    nodes = {**((c.graph or {}).get("nodes") or {}), **resolved_nodes(c)}  # omitted roster agents keep valid caps
-    known = set(nodes) | {v.get("agent") for v in nodes.values() if v.get("agent")}
-    problems = [f"max_tokens_per_node key '{k}' matches no node or agent role" for k in caps if k not in known]
-    problems += [f"max_tokens_per_node.{k} must be a positive integer" for k, v in caps.items()
-                 if not isinstance(v, int) or isinstance(v, bool) or v <= 0]
+    """Validate the retry / round limits. Token usage is recorded but never capped."""
+    problems = []
     for k in ("node_retry", "max_rounds", "max_story_revisions", "max_gate_revisions"):
         v = c.config["budgets"].get(k)
         if v is not None and (not isinstance(v, int) or isinstance(v, bool) or v < (0 if k != "max_rounds" else 1)):
@@ -602,23 +587,6 @@ def cmd_start(a, c):
                          if isinstance(r, dict) and r.get("status") == "proposed")
     if pending_rev:
         refuse(f"design revision(s) awaiting approval: {', '.join(pending_rev)}; decide them (design-decide) first")
-    b = c.config["budgets"]
-    if st["tokens_total"] >= b["max_tokens_per_run"]:
-        refuse("run token budget exhausted", action="stop")
-    cap_tokens = node_cap(c, a.node)
-    if cap_tokens and n["tokens"] >= cap_tokens:
-        refuse(f"node {a.node} token budget exhausted", action="stop_node")
-    # reservation (F09): what other running nodes may still spend is held back from the run ceiling
-    held = sum(max(0, (node_cap(c, k) or 0) - v["tokens"]) for k, v in st["nodes"].items()
-               if v["status"] == "running" and k != a.node)
-    if not cap_tokens and (resolved_nodes(c).get(a.node) or {}).get("agent"):  # T62: unmetered delegated work
-        refuse(f"node {a.node} delegates to an agent but has no token cap; set budgets.max_tokens_per_node for the "
-               "node or its agent (unmetered usage cannot be reserved)", action="configure")
-    own = max(0, (cap_tokens or 0) - n["tokens"])
-    if st["tokens_total"] + held >= b["max_tokens_per_run"] or st["tokens_total"] + held + own > b["max_tokens_per_run"]:
-        refuse("run token budget is fully reserved by running nodes (this node's own reservation would not fit)",
-               action="stop")
-    n["reserved"] = own
     n["attempts"] += 1
     n["status"] = "running"
     n["started"] = now()
@@ -693,7 +661,6 @@ def cmd_result(a, c):
     err = ingest_usage(st, a.node, tokens, f"result:{a.node}:{n['attempts']}")
     if err and err != "duplicate":
         refuse(err, 2)
-    n["reserved"] = 0
     n["ended"] = now()
     n["output_hash"] = new_hash
     if problems:
@@ -959,24 +926,10 @@ def cmd_tokens(a, c):
 
 
 def cmd_budget(a, c):
-    st, b = c.state(), c.config["budgets"]
-    ceiling = b["max_tokens_per_run"]
-    total = st["tokens_total"]
-    comp = b.get("compaction", {})
-    cap_tokens = node_cap(c, a.node) if a.node else None
+    """Report token usage. There are no token limits: this never asks to stop."""
+    st = c.state()
     node_tok = st["nodes"].get(a.node, {}).get("tokens", 0) if a.node else 0
-    actions = []
-    if total >= ceiling:
-        actions.append("stop")
-    elif total >= comp.get("run_soft_threshold", 0.8) * ceiling:
-        actions.append("compact_run")
-    if cap_tokens and node_tok >= cap_tokens:
-        actions.append("stop_node")
-    elif cap_tokens and node_tok >= comp.get("node_context_threshold", 0.7) * cap_tokens:
-        actions.append("compact_node")
-    action = actions[0] if actions else "ok"
-    out({"ok": True, "action": action, "actions": actions, "tokens_total": total, "ceiling": ceiling,
-         "pct": round(100 * total / ceiling, 1), "node_tokens": node_tok, "node_cap": cap_tokens})
+    out({"ok": True, "action": "ok", "actions": [], "tokens_total": st["tokens_total"], "node_tokens": node_tok})
 
 
 # ----------------------------------------------------------------- stories -> waves (spec §7.5, §8.3)
@@ -1495,7 +1448,7 @@ def cmd_escalation_report(a, c):
     st = c.state()
     L = [f"# Escalation report: {st.get('run_id')}", "",
          f"- Status: {st.get('status')}", f"- Round: {st.get('round', 0)}",
-         f"- Tokens: {st.get('tokens_total', 0)} / {c.config['budgets']['max_tokens_per_run']}", "",
+         f"- Tokens: {st.get('tokens_total', 0)}", "",
          "## Nodes", "| Node | Status | Attempts | Tokens |", "|---|---|---|---|"]
     for k, n in sorted(st["nodes"].items()):
         L.append(f"| {k} | {n.get('status')} | {n.get('attempts', 0)} | {n.get('tokens', 0)} |")

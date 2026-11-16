@@ -1,6 +1,6 @@
 ---
 name: ghe-run
-description: Run the GHE graph for a piece of work (Jira ticket, file, or prompt), or resume a waiting run. Deterministic orchestration - order, retries, budgets and gates are decided by ghe/runner/ghe_tool.py and graph.yaml, never by your judgement.
+description: Run the GHE graph for a piece of work (Jira ticket, file, or prompt), or resume a waiting run. Deterministic orchestration - order, retries and gates are decided by ghe/runner/ghe_tool.py and graph.yaml, never by your judgement.
 allowed-tools: Read, Write, Edit, Glob, Grep, Bash, Agent, AskUserQuestion, Skill
 argument-hint: <jira key|url | file | "prompt"> [--mode new|existing|maintain] [--roster ba,architect,...] [--deploy local|cloud] [--reviewer] [--repo <name|path|url>]... | --resume <run-id>
 ---
@@ -14,10 +14,8 @@ You are the ORCHESTRATOR. You do not design, code or test. You walk the graph. `
 - Then `T init` → `RUN` (never reuses a run id; to continue an existing run use `T init --resume <run-id>`, which only validates it). Parse flags (`--repo` may repeat). Run the **discover** skill (it finds or clones the repos the work needs, runs **ghe-setup** on any repo that lacks it, writes `source.md` and freezes its hash through `T result --node discover`). With `tracker: jira`, use the **jira-sync** skill to create/reuse the Epic and register it (`T ticket --kind epic`).
 - Resolve the roster/graph: `T resolve --run $RUN`. `ok:false` → show `reason`, `T finish --status FAILED --reason "<why>"`, stop. Print any `warnings` to the user. The result lists `layers` (nodes that may run concurrently).
 
-## 1. Budget check (before EVERY node and after recording its tokens)
-`T budget --run $RUN --node <n>` → `actions`:
-- `stop` / `stop_node`: stop, write the escalation report (§9), `T finish --status WAITING_HUMAN` (or `FAILED --reason "<why>"` if the human cannot continue), tell the user the cap and how to raise it in `ghe/config.yaml`.
-- `compact_run` / `compact_node`: run the **compact** skill (anchor + summary + drift check), then continue. Optional work (devops-prep) is skipped when `compact_run`.
+## 1. Token usage (after recording each node's tokens)
+There are no token limits. Record usage with `T tokens --run $RUN --node <n> --add <total>`; `T budget --run $RUN` only reports totals and never asks you to stop or compact.
 Usage has ONE authoritative ingestion path: a node that ends in `T result` reports its tokens there (`--tokens <n>`, counted once per attempt) - do NOT also call `T tokens` for it. Use `T tokens --run $RUN --node <n> --add <n> --event <unique-id>` only for usage that never reaches a `result` (e.g. a triage agent); the `--event` id makes a replay count once and a negative or malformed value is refused. If usage is unknown, estimate conservatively from output size and say so. Caps in `max_tokens_per_node` match the node name first, then the node's agent role (`tester` caps node `test`).
 
 ## 2. Executing one node (`NODE`)
@@ -35,7 +33,7 @@ Take `layers` from `graph.resolved.yaml` in order. A layer's nodes run concurren
 - `discover`: already done in §0.
 - `review-gate`: the **review-gate** skill (§7).
 - `builder`: §4. `deploy`: §5. `test`: §8 loop. `final-report`: §10.
-- `devops-prep` (optional): run in the same layer as qa/builder; skipped under `compact_run` (`T skip --node devops-prep --reason "compact_run"`; only nodes marked `optional` in the graph can be skipped, and a reason is required).
+- `devops-prep` (optional): run in the same layer as qa/builder; may be skipped (`T skip --node devops-prep --reason "<why>"`; only nodes marked `optional` in the graph can be skipped, and a reason is required).
 
 ## 4. Builder node (plan → waves → workers → integrate)
 1. `builder` agent, `PHASE=plan` → `plans/stories.json`. `T result --node builder` after the plan phase is NOT called yet (the node completes in step 5); instead check the file exists, then `T waves --run $RUN`. `ok:false` (missing owns, cycle, unknown deps) → send errors back to the builder once.
@@ -67,10 +65,10 @@ For `round` = 1..`max_rounds`:
    - `first`/`progress`: continue below.
 3. `architect` agent `MODE=triage` → `defects/triage-round-N.json`.
 4. Fix routing (only affected work): `impl` → fix stories (wave-run per §4, worker + story review); `test-bug` → `qa` agent `MODE=fix`; `env` → `devops` agent; `design` → architect amended the design: re-sync qa+builder for affected parts.
-5. `deploy` again (only if code/env changed), then next round. The token budget is checked before each round (§1); the 140k `reserve_for_fix_rounds` is for these.
+5. `deploy` again (only if code/env changed), then next round.
 
 ## 9. Escalation package (the run never dies silently)
-Write `$RUN/artifacts/escalation-report.md`: the request (quoted), what was done (node statuses), what failed and the evidence (problems, defect fingerprints, budget numbers), and the exact decisions the human must make. `T finish --status WAITING_HUMAN` (human-resolvable) or `FAILED`. With jira: comment it on the epic.
+Write `$RUN/artifacts/escalation-report.md`: the request (quoted), what was done (node statuses), what failed and the evidence (problems, defect fingerprints), and the exact decisions the human must make. `T finish --status WAITING_HUMAN` (human-resolvable) or `FAILED`. With jira: comment it on the epic.
 
 ## 10. Finish
 If the roster has no Tester (e.g. `maintain`), run `T verify` first (the runner executes `validation.commands`; empty = blocked) or record a waiver with `T verify --waive --reason "..." --by "<who>"` (F23). `finish --status DONE` refuses otherwise.

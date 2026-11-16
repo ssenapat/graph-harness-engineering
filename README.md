@@ -2,7 +2,7 @@
 
 A Claude Code toolkit that turns a requirement (a Jira ticket, a file, or a prompt) into a working, deployed project using a **deterministic graph of specialist agents** instead of an open-ended loop.
 
-The graph is data (`ghe/graph.yaml`). A small Python runner (`ghe/runner/ghe_tool.py`) decides what runs next, enforces budgets, detects no-progress and checks drift. The LLM never decides control flow.
+The graph is data (`ghe/graph.yaml`). A small Python runner (`ghe/runner/ghe_tool.py`) decides what runs next, detects no-progress and checks drift. The LLM never decides control flow.
 
 **Runner guarantees** (hardening F01-F04): state writes are atomic; every per-run command holds `RUN_DIR/.lock` (cross-platform, stale locks are broken after a dead owner or 60s); `init` never overwrites a run (`--resume <id>` to continue one); `start` refuses unmet dependencies, running/done nodes, waiting or terminal runs and exhausted budgets; `skip` needs `--reason` and an `optional` node; `finish --status DONE` is refused unless the run really is complete; `result` needs a started node, is idempotent, and only accepts artifacts inside `artifacts/`. The lock is tested on macOS; on Windows it is implemented but not verified.
 
@@ -118,7 +118,7 @@ Plugin install (Option A):
 ```
 your-project/
 ├── ghe/
-│   ├── config.yaml        # tracker, Jira site/project/board, validation commands, budgets, deploy target
+│   ├── config.yaml        # tracker, Jira site/project/board, validation commands, deploy target
 │   ├── graph.yaml         # the default graph and roster rules
 │   ├── workspace.yaml     # repos this workspace works on (written by a run)
 │   ├── memory/
@@ -192,15 +192,15 @@ Each run is independent. A new run does not read earlier folders under `ghe/runs
 
 ## Key properties
 
-- **Deterministic control flow:** the runner and `ghe/graph.yaml` decide order, retries, budgets and gates; the LLM only executes a node.
+- **Deterministic control flow:** the runner and `ghe/graph.yaml` decide order, retries and gates; the LLM only executes a node.
 - **Jira is the system of record** (epic per run, tickets per agent/story). The default is `tracker: local`; set `tracker: jira` with your site and project to use Jira.
-- **Hard ceiling of 1,000,000 tokens per run** (input + output + cache write + cache read). At 70% of a node's cap the context is compacted, and a drift check proves the summary still matches the verbatim request and REQ ids.
+- **No token limits:** usage is recorded and reported (`tokens`, `status`) but never capped. Compaction (with a drift check proving the summary still matches the original request) is optional.
 - **Parallel stories** only with disjoint `owns` globs, each in its own git worktree.
 - **Bounded retries:** identical failures escalate as "no progress" instead of looping.
 - **Human gates:** requirement review (optional) and cloud `terraform apply` / destroy.
 - **AWS region and credentials come from whoever makes the request.** The agent asks if they are missing and never stores them in artifacts, Jira or summaries.
 - **Runner-enforced rules, not prompts:** state writes are atomic and every per-run command holds `RUN_DIR/.lock` (stale locks are broken after 60s, cross-platform). `start` refuses unmet dependencies, running/done nodes, waiting or terminal runs and an exhausted budget. `finish --status DONE` is refused without `RUN-REPORT.md`, with traceability gaps, or without deterministic verification (`verify`) or a recorded waiver. `result` is idempotent by digest and rejects traversal, absolute and symlink-escape artifact paths. Defects must carry current plan/source evidence (F12/T16).
-- **Budgets and corrections:** usage is ingested once per event id, per-node and per-role caps apply, and concurrent starts cannot over-reserve the run ceiling. Retry rules are separate: `node_retry` (technical), `max_rounds` (verification), `max_story_revisions` (substantive correction) and `max_gate_revisions`. Further corrections need an explicit, identified `allowance-grant`; `correction_scope` is `story` (default) or `epic_global`.
+- **Budgets and corrections:** usage is ingested once per event id, and duplicate events are not double-counted. Retry rules are separate: `node_retry` (technical), `max_rounds` (verification), `max_story_revisions` (substantive correction) and `max_gate_revisions`. Further corrections need an explicit, identified `allowance-grant`; `correction_scope` is `story` (default) or `epic_global`.
 - **Controlled actions:** `authorize` records who approved a cloud-apply or destructive action. The `ghe_guard.py` hook is a second layer; it also blocks edits to runner-owned state, a frozen `source.md`, a started `Agent` dispatch over budget, and edits to design files (HLD/LLD/CONTRACT) without an approved design revision (`design-propose` / `design-decide`).
 - **Side effects and trackers:** `journal-intent` / `journal-confirm` / `journal-reconcile` record external writes so a crash cannot cause a duplicate; `finish` refuses while one is unresolved. Tickets are idempotent per (kind, node, ref) with epic > story > subtask hierarchy. Tracker outage, switching and human edits are handled explicitly (`tracker-down`, `tracker-switch`, `ticket-attach`, `ticket-field`).
 - **Memory and context:** `memory-manifest` builds a bounded, relevance-ranked packet (superseded entries excluded, nothing truncated silently). `context-packet` does the same for large sources. `escalation-report` renders the human escalation package from recorded state with no LLM.

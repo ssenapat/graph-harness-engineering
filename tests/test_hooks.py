@@ -219,27 +219,9 @@ def test_f19_corrupt_state_fails_closed(tmp_path):
 
 
 # ---- F09: tool-dispatch enforcement of the run token ceiling
-def _dispatch(root, tokens_total, ceiling=1000, status="RUNNING"):
-    cfg = os.path.join(str(root), "ghe", "config.yaml")
-    os.makedirs(os.path.dirname(cfg), exist_ok=True)
-    open(cfg, "w").write(f"budgets:\n  max_tokens_per_run: {ceiling}\n")
-    rd = os.path.join(str(root), "ghe", "runs", "r1")
-    os.makedirs(rd, exist_ok=True)
-    json.dump({"run_id": "r1", "status": status, "tokens_total": tokens_total, "gates": {}},
-              open(os.path.join(rd, "state.json"), "w"))
-    return run("ghe_guard.py", {"tool_name": "Agent", "tool_input": {"subagent_type": "builder"}}, root)
 
 
-@pytest.mark.parametrize("tool", ["Agent", "Task"])
-def test_dispatch_denied_when_run_budget_exhausted(tmp_path, tool):
-    _dispatch(tmp_path, 1000)
-    r = run("ghe_guard.py", {"tool_name": tool, "tool_input": {}}, tmp_path)
-    assert r.returncode == 2 and "budget exhausted" in r.stderr
 
 
-def test_dispatch_allowed_with_budget_left(tmp_path):
-    assert _dispatch(tmp_path, 999).returncode == 0
 
 
-def test_dispatch_allowed_when_no_active_run(tmp_path):
-    assert _dispatch(tmp_path, 5000, status="DONE").returncode == 0

@@ -63,48 +63,12 @@ def test_f09_result_rejects_negative_tokens(proj):
     assert refused(d, rc) and get_state(run)["tokens_total"] == 0
 
 
-def test_f08_role_cap_applies_to_node_with_that_agent(proj):  # T12: tester cap -> node `test`
-    run = resolved_run(proj, roster=["ba", "architect", "qa", "builder", "devops", "tester"])
-    cap = yaml.safe_load(open(os.path.join(str(proj), "ghe", "config.yaml")))["budgets"]["max_tokens_per_node"]["tester"]
-    d, rc = t(proj, "budget", "--run", run, "--node", "test")
-    assert d["node_cap"] == cap
-    d, rc = t(proj, "budget", "--run", run, "--node", "deploy")
-    assert d["node_cap"] == yaml.safe_load(open(os.path.join(str(proj), "ghe", "config.yaml")))["budgets"]["max_tokens_per_node"]["devops"]
 
 
-def test_f08_start_enforces_role_cap(proj):
-    run = resolved_run(proj, roster=["ba", "architect", "qa", "builder", "devops", "tester"])
-    for n in ("discover", "ba", "architect"):
-        pass
-    set_state(run, lambda st: st["nodes"]["test"].update(tokens=10**6 - 1))
-    set_state(run, lambda st: st["nodes"]["deploy"].update(status="done"))
-    set_state(run, lambda st: st["nodes"]["qa"].update(status="done"))
-    set_state(run, lambda st: st.update(tokens_total=0))
-    d, rc, _ = tx(proj, "start", "--run", run, "--node", "test")
-    assert refused(d, rc) and d.get("action") == "stop_node"
 
 
-def test_f08_unknown_cap_key_is_a_config_error(proj):
-    cfg = os.path.join(str(proj), "ghe", "config.yaml")
-    c = yaml.safe_load(open(cfg))
-    c["budgets"]["max_tokens_per_node"]["nonesuch"] = 1000
-    yaml.safe_dump(c, open(cfg, "w"))
-    run = resolved_run.__wrapped__(proj) if hasattr(resolved_run, "__wrapped__") else None
-    from test_ghe_tool import new_run
-    run = new_run(proj)
-    d, rc = t(proj, "resolve", "--run", run)
-    assert rc != 0 and "nonesuch" in json.dumps(d)
 
 
-def test_f09_start_refuses_when_run_budget_reserved_by_running_nodes(proj):
-    run = resolved_run(proj)
-    set_state(run, lambda st: (st.update(tokens_total=999_000),
-                               st["nodes"]["discover"].update(status="running")))
-    set_state(run, lambda st: st["nodes"]["discover"].update(tokens=0))
-    # discover has no cap -> reserves nothing; ba would start. Give builder a cap-heavy running state:
-    set_state(run, lambda st: st["nodes"]["builder"].update(status="running", tokens=0))
-    d, rc, _ = tx(proj, "start", "--run", run, "--node", "ba")
-    assert refused(d, rc)
 
 
 def _defects(run, n, body):

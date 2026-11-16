@@ -188,13 +188,6 @@ def test_start_refuses_terminal_run(proj, terminal):
     assert get_state(run)["status"] == terminal, "a refused start must not revive a terminal run"
 
 
-def test_start_refuses_when_run_budget_exhausted(proj):
-    run = resolved_run(proj)
-    set_state(run, lambda st: st.update(tokens_total=50_000_000))
-    d, rc = t(proj, "budget", "--run", run, "--node", "discover")
-    assert d["action"] in ("stop", "stop_node"), d  # precondition: the budget command says stop
-    d, rc, _ = tx(proj, "start", "--run", run, "--node", "discover")
-    assert refused(d, rc), "start must honour the budget stop"
 
 
 # ================================================================ F03: skip / finish
@@ -832,44 +825,11 @@ def test_t16_matching_plan_sha_passes(proj):
 
 
 # ---- F09 / T13: concurrent starts cannot over-reserve the run ceiling
-def test_t13_concurrent_starts_cannot_overreserve_run_budget(proj):
-    run = new_run(proj)
-    gp = os.path.join(proj, "ghe", "graph.yaml")
-    g = yaml.safe_load(open(gp))
-    g["nodes"]["p1"] = {"agent": None, "needs": [], "produces": []}
-    g["nodes"]["p2"] = {"agent": None, "needs": [], "produces": []}
-    g["nodes"]["final-report"]["needs"] = list(g["nodes"]["final-report"]["needs"]) + ["p1", "p2"]
-    yaml.safe_dump(g, open(gp, "w"), sort_keys=False)
-    cp = os.path.join(proj, "ghe", "config.yaml")
-    cfg = yaml.safe_load(open(cp))
-    cfg["budgets"]["max_tokens_per_run"] = 1000
-    cfg["budgets"]["max_tokens_per_node"] = {"p1": 800, "p2": 800}
-    yaml.safe_dump(cfg, open(cp, "w"), sort_keys=False)
-    assert t(proj, "resolve", "--run", run)[1] == 0
-    procs = [subprocess.Popen([sys.executable, TOOL, "start", "--root", str(proj), "--run", run, "--node", n],
-                              stdout=subprocess.PIPE, stderr=subprocess.PIPE) for n in ("p1", "p2")]
-    rcs = sorted(p.wait() for p in procs)
-    assert rcs == [0, 1]
-    st = json.load(open(os.path.join(run, "state.json")))
-    assert sum(n.get("reserved", 0) for n in st["nodes"].values()) <= 1000
 
 
 # ---- F09 / T62: delegated work with no token cap is blocked (unmetered usage cannot be reserved)
-def test_t62_uncapped_delegated_node_is_blocked(proj):
-    run = new_run(proj)
-    cp = os.path.join(proj, "ghe", "config.yaml")
-    cfg = yaml.safe_load(open(cp)); cfg["budgets"]["max_tokens_per_node"].pop("ba", None)
-    yaml.safe_dump(cfg, open(cp, "w"), sort_keys=False)
-    assert t(proj, "resolve", "--run", run)[1] == 0
-    complete(proj, run, "discover")
-    d, rc = t(proj, "start", "--run", run, "--node", "ba")
-    assert rc != 0 and d["action"] == "configure" and "no token cap" in d["error"]
-    assert json.load(open(os.path.join(run, "state.json")))["nodes"]["ba"]["status"] == "pending"
 
 
-def test_t62_runner_owned_node_needs_no_cap(proj):
-    run = resolved_run(proj)
-    assert t(proj, "start", "--run", run, "--node", "discover")[1] == 0
 
 
 # ---- F13 / T37, T54, T60: side-effect journal and reconciliation

@@ -5,7 +5,7 @@ allowed-tools: Read, Write, Bash, Agent
 ---
 # compact — context compaction without drift (spec §11.1)
 
-Triggers (from `ghe_tool.py budget`): `compact_node` (node ≥ 70% of its cap) or `compact_run` (run ≥ 80% of 1,000,000).
+Optional: use it when a node's or the run's context gets large. There are no token limits.
 
 ## Output: `RUN_DIR/artifacts/context-summary.md`
 ```markdown
