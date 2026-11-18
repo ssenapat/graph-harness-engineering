@@ -1,9 +1,12 @@
 # Changelog
 ## [Unreleased]
 
+## [0.3.1]
 ### Added
-- Expense report (`expense-report`, `tokens --story`, `cost` config): cost per story/defect, rework, epic roll-up across runs, Jira cost comments.
+- Expense report (`expense-report`, `tokens --story`, `cost` config): cost per story/defect, rework, epic roll-up across runs, Jira cost comments. Reports are written to `docs/expenses/`.
 - Jira tracker: story and defect tickets are required before `finish`; `jira.assign_to`; `ticket-status` and `ticket-summary` commands; run report Tickets section; setup asks for assignee policy and resolves issue types.
+### Removed
+- Token caps and budget enforcement (per-run, per-node, reserve, compaction thresholds). Usage is still recorded and reported; nothing stops or refuses work because of it. Existing config keys are ignored.
 
 ## [0.3.0]
 ### Added
