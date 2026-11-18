@@ -985,7 +985,7 @@ def _price(cfg, e):
 
 
 def expense_path(c, key):
-    return os.path.join(c.root, "ghe", "expenses", f"{key}.md")
+    return os.path.join(c.root, "docs", "expenses", f"{key}.md")
 
 
 def _summarise(c, st):
@@ -1009,7 +1009,7 @@ def _summarise(c, st):
 
 
 def cmd_expense_report(a, c):
-    """Write ghe/expenses/<epic-or-run>.md: cost per story/defect/node, rework, run total and the epic roll-up
+    """Write docs/expenses/<epic-or-run>.md: cost per story/defect/node, rework, run total and the epic roll-up
     across every run of the same epic. Prints the Jira comments the jira-sync skill must post."""
     st = c.state()
     bad = cost_config_problems(c.config)
@@ -1024,7 +1024,7 @@ def cmd_expense_report(a, c):
     total_cost = sum(v["cost"] for v in nodes.values())
     tix = {t.get("ref"): t["key"] for t in reg.values() if t.get("ref")}
     # project ledger: one entry per run, so an epic split across several runs consolidates
-    led_path = os.path.join(c.root, "ghe", "expenses", "ledger.json")
+    led_path = os.path.join(c.root, "docs", "expenses", "ledger.json")
     ledger = load_json(led_path, {}) or {}
     ledger.setdefault("runs", {})[st["run_id"]] = {
         "epic": key, "tokens": total_tokens, "cost": round(total_cost, 6), "priced": priced, "currency": cur,

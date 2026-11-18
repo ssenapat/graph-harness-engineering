@@ -30,7 +30,7 @@ models:                              # tiers: top | mid | small  (mapped by the 
   builder_integration: top
   default: mid
   mechanical: small
-cost:                                # expense report (ghe/expenses/): price per 1M tokens, per model tier
+cost:                                # expense report (docs/expenses/): price per 1M tokens, per model tier
   currency: USD
   prices: {}                         # e.g. {top: {in: 15, out: 75, cache: 1.5}, mid: {...}, small: {...}}; empty = tokens only
 validation:
