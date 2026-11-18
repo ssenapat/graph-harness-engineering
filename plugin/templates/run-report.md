@@ -15,6 +15,6 @@
 ## Context compactions
 | When | Trigger | Before | After | Drift check |
 |---|---|---|---|---|
-## Cost: <tokens_total> / 1,000,000
+## Cost: <tokens_total> tokens (details: ghe/expenses/<epic-or-run>.md; money shown when cost.prices is configured)
 ## Deployed to
 ## Open risks / follow-ups

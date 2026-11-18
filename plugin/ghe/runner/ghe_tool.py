@@ -781,6 +781,8 @@ def finish_problems(c, st):
             problems.append("no Tester ran and no deterministic verification passed or was waived "
                             "(run `verify`, or `verify --waive --reason ... --by ...`)")
     problems += ticket_problems(c, st)
+    if (c.config.get("cost") or {}).get("prices") and not st.get("expense_report"):
+        problems.append("expense report not written (run `expense-report`; cost.prices is configured)")
     gaps = trace_compute(c)[1]
     problems += [f"traceability gap: {g}" for g in gaps]
     if st.get("round", 0) > 0:
@@ -914,7 +916,22 @@ def cmd_finish(a, c):
 
 
 # ----------------------------------------------------------------- tokens + budgets (spec §11)
+def _nonneg_int(v, name):
+    if v is None:
+        return None
+    try:
+        n = int(v)
+    except (TypeError, ValueError):
+        n = -1
+    if n < 0:
+        refuse(f"{name} must be a non-negative integer, got {v!r}", 2)
+    return n
+
+
 def cmd_tokens(a, c):
+    """Record token usage for a node. Optional cost attribution: --story <story-id|defect:<id>> says what the
+    usage was spent on; --tokens-in/--tokens-out/--tokens-cache (must sum to --add) enable exact pricing;
+    --tier overrides the model tier used for the price lookup."""
     st = c.state()
     try:
         add = int(a.add)
@@ -922,13 +939,137 @@ def cmd_tokens(a, c):
         add = -1
     if add < 0:
         refuse(f"--add must be a non-negative integer, got {a.add!r}", 2)
+    split = {k: _nonneg_int(getattr(a, f"tokens_{k}", None), f"--tokens-{k}") for k in ("in", "out", "cache")}
+    if any(v is not None for v in split.values()) and sum(v or 0 for v in split.values()) != add:
+        refuse("--tokens-in + --tokens-out + --tokens-cache must equal --add", 2)
     st["nodes"].setdefault(a.node, {"status": "pending", "attempts": 0, "tokens": 0, "output_hash": None})
     err = ingest_usage(st, a.node, add, a.event)
     if err and err != "duplicate":
         refuse(err, 2)
     if not err:
+        models = c.config.get("models") or {}
+        st.setdefault("cost_ledger", []).append({
+            "at": now(), "node": a.node, "attempt": st["nodes"][a.node].get("attempts", 0),
+            "item": (a.story or "").strip(), "tier": a.tier or models.get(a.node) or models.get("default") or "mid",
+            "tokens": add, "split": all(v is not None for v in split.values()),
+            "in": split["in"] or 0, "out": split["out"] or 0, "cache": split["cache"] or 0})
         c.save(st)
     out({"ok": True, "tokens_total": st["tokens_total"], "duplicate": err == "duplicate"})
+
+
+# ----------------------------------------------------------------- expense report (cost per story / defect / epic)
+def cost_config_problems(cfg):
+    cc = cfg.get("cost") or {}
+    problems = []
+    prices = cc.get("prices") or {}
+    if not isinstance(prices, dict):
+        return ["cost.prices must be a mapping of tier -> {in, out, cache}"]
+    for tier, pr in prices.items():
+        if not isinstance(pr, dict):
+            problems.append(f"cost.prices.{tier} must be a mapping with in/out/cache")
+            continue
+        for k, v in pr.items():
+            if k not in ("in", "out", "cache") or isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0:
+                problems.append(f"cost.prices.{tier}.{k} must be a non-negative number (in/out/cache, per 1M tokens)")
+    return problems
+
+
+def _price(cfg, e):
+    """-> (cost or None, estimated?). cost is None when no price is configured for the entry's tier."""
+    pr = ((cfg.get("cost") or {}).get("prices") or {}).get(e.get("tier"))
+    if not pr:
+        return None, False
+    if e.get("split"):
+        return (e["in"] * pr.get("in", 0) + e["out"] * pr.get("out", 0) + e["cache"] * pr.get("cache", 0)) / 1e6, False
+    return e["tokens"] * pr.get("in", 0) / 1e6, True   # no split reported: priced at the input rate, flagged
+
+
+def expense_path(c, key):
+    return os.path.join(c.root, "ghe", "expenses", f"{key}.md")
+
+
+def _summarise(c, st):
+    cfg = c.config
+    items, nodes, rework = {}, {}, [0, 0.0]
+    priced = True
+    est = False
+    for e in st.get("cost_ledger") or []:
+        cost, estimated = _price(cfg, e)
+        if cost is None:
+            priced = False
+        est = est or estimated
+        for bucket, k in ((items, e["item"] or "(unattributed)"), (nodes, e["node"])):
+            b = bucket.setdefault(k, {"tokens": 0, "cost": 0.0})
+            b["tokens"] += e["tokens"]
+            b["cost"] += cost or 0.0
+        if e.get("attempt", 0) > 1:
+            rework[0] += e["tokens"]
+            rework[1] += cost or 0.0
+    return items, nodes, rework, priced, est
+
+
+def cmd_expense_report(a, c):
+    """Write ghe/expenses/<epic-or-run>.md: cost per story/defect/node, rework, run total and the epic roll-up
+    across every run of the same epic. Prints the Jira comments the jira-sync skill must post."""
+    st = c.state()
+    bad = cost_config_problems(c.config)
+    if bad:
+        refuse("invalid cost config: " + "; ".join(bad))
+    items, nodes, rework, priced, est = _summarise(c, st)
+    cur = (c.config.get("cost") or {}).get("currency") or "USD"
+    reg = st.get("tickets") or {}
+    epic = next((t for t in reg.values() if t.get("kind") == "epic"), None)
+    key = epic["key"] if epic else st["run_id"]
+    total_tokens = sum(v["tokens"] for v in nodes.values())
+    total_cost = sum(v["cost"] for v in nodes.values())
+    tix = {t.get("ref"): t["key"] for t in reg.values() if t.get("ref")}
+    # project ledger: one entry per run, so an epic split across several runs consolidates
+    led_path = os.path.join(c.root, "ghe", "expenses", "ledger.json")
+    ledger = load_json(led_path, {}) or {}
+    ledger.setdefault("runs", {})[st["run_id"]] = {
+        "epic": key, "tokens": total_tokens, "cost": round(total_cost, 6), "priced": priced, "currency": cur,
+        "items": {k: {"tokens": v["tokens"], "cost": round(v["cost"], 6)} for k, v in items.items()}, "at": now()}
+    os.makedirs(os.path.dirname(led_path), exist_ok=True)
+    atomic_write_json(led_path, ledger)
+    runs = {r: v for r, v in ledger["runs"].items() if v["epic"] == key}
+    epic_tokens = sum(v["tokens"] for v in runs.values())
+    epic_cost = sum(v["cost"] for v in runs.values())
+    money = (lambda x: f"{x:,.4f} {cur}") if priced else (lambda x: "n/a")
+    L = [f"# Expense report - {key}", "",
+         f"Run: {st['run_id']} - generated {now()}", ""]
+    if not priced:
+        L += ["> No price configured for one or more model tiers (`cost.prices` in `ghe/config.yaml`): "
+              "tokens are exact, money is shown as n/a.", ""]
+    if est:
+        L += ["> Some usage was reported without an in/out/cache split; it is priced at the input rate (estimate).", ""]
+    L += ["## Per story / defect", "| Item | Ticket | Tokens | Cost |", "|---|---|---|---|"]
+    for k, v in sorted(items.items()):
+        L.append(f"| {k} | {tix.get(k, '-')} | {v['tokens']:,} | {money(v['cost'])} |")
+    L += ["", "## Per node", "| Node | Tokens | Cost |", "|---|---|---|"]
+    L += [f"| {k} | {v['tokens']:,} | {money(v['cost'])} |" for k, v in sorted(nodes.items())]
+    L += ["", "## Rework (attempt 2 or later)", f"{rework[0]:,} tokens, {money(rework[1])}", "",
+          "## This run", f"**{total_tokens:,} tokens, {money(total_cost)}**", ""]
+    if len(runs) > 1 or epic:
+        L += [f"## Epic roll-up ({key})", "| Run | Tokens | Cost |", "|---|---|---|"]
+        L += [f"| {r} | {v['tokens']:,} | {money(v['cost'])} |" for r, v in sorted(runs.items())]
+        L += ["", f"**Epic total: {epic_tokens:,} tokens, {money(epic_cost)}**", ""]
+    path = expense_path(c, key)
+    atomic_write_text(path, "\n".join(L) + "\n")
+    st["expense_report"] = {"path": os.path.relpath(path, c.root), "at": now()}
+    c.save(st)
+    comments = []
+    if reg:
+        for k, v in sorted(items.items()):
+            tk = tix.get(k)
+            if tk:
+                comments.append({"key": tk, "comment": f"GHE cost: {v['tokens']:,} tokens, {money(v['cost'])}"})
+        if epic:
+            comments.append({"key": epic["key"], "comment": f"GHE cost roll-up: {epic_tokens:,} tokens, {money(epic_cost)} "
+                             f"across {len(runs)} run(s). Report: {st['expense_report']['path']}"})
+    out({"ok": True, "path": st["expense_report"]["path"], "epic": key, "run_tokens": total_tokens,
+         "run_cost": round(total_cost, 6) if priced else None, "epic_tokens": epic_tokens,
+         "epic_cost": round(epic_cost, 6) if priced else None, "priced": priced,
+         "jira_comments": comments if c.config.get("tracker") == "jira" else []})
 
 
 def cmd_budget(a, c):
@@ -2222,7 +2363,9 @@ def main():
     add("status", cmd_status)
     add("finish", cmd_finish, ("--status", {"required": True, "choices": ["DONE", "FAILED", "CANCELLED", "WAITING_HUMAN"]}), ("--reason", {"default": ""}))
     add("tokens", cmd_tokens, ("--node", {"required": True}), ("--add", {"required": True}),
-        ("--event", {"default": ""}))
+        ("--event", {"default": ""}), ("--story", {"default": ""}), ("--tier", {"default": ""}),
+        ("--tokens-in", {"default": None}), ("--tokens-out", {"default": None}), ("--tokens-cache", {"default": None}))
+    add("expense-report", cmd_expense_report)
     add("budget", cmd_budget, ("--node", {}))
     add("waves", cmd_waves, ("--stories", {}))
     add("defects", cmd_defects, ("--round", {"required": True}))

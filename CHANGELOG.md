@@ -2,6 +2,7 @@
 ## [Unreleased]
 
 ### Added
+- Expense report (`expense-report`, `tokens --story`, `cost` config): cost per story/defect, rework, epic roll-up across runs, Jira cost comments.
 - Jira tracker: story and defect tickets are required before `finish`; `jira.assign_to`; `ticket-status` and `ticket-summary` commands; run report Tickets section; setup asks for assignee policy and resolves issue types.
 
 ## [0.3.0]

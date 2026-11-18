@@ -9,6 +9,9 @@ The graph is data (`ghe/graph.yaml`). A small Python runner (`ghe/runner/ghe_too
 
 **Jira tracker rules (runner-enforced).** With `tracker: jira`, `finish` and the planner's `result` are refused while any story in `plans/stories.json` or any defect lacks a ticket, and while a done story's ticket is not Done. `jira.assign_to` (`requester`, an account id, or `none`) controls assignment. `T ticket-status` records transitions and `T ticket-summary` feeds the run report's Tickets section. Setup resolves the site's issue types once into `jira.issue_types`.
 
+
+**Expense report.** `T tokens --story <id|defect:<id>> [--tokens-in/--tokens-out/--tokens-cache N]` attributes usage to a story or defect. `T expense-report` writes `ghe/expenses/<epic-or-run>.md` (cost per story/defect and node, rework, run total, and the epic total across every run of the epic) and returns the Jira comments to post (one per story/defect ticket plus the epic roll-up). Money needs `cost.prices` (per 1M tokens, per model tier) in `ghe/config.yaml`; without it the report shows tokens only. Once prices are set, `finish` requires the report. Note: `ghe/` is gitignored by default, so the report stays local unless you un-ignore `ghe/expenses/`.
+
 ## Prerequisites
 
 - Claude Code, Python 3.9+, and `pip install pyyaml`.
